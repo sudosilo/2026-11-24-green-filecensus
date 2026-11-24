@@ -315,6 +315,18 @@ public class MainActivity extends Activity {
         @JavascriptInterface public String restore(String ids) { try { return Trash.restore(MainActivity.this, ids); } catch (Exception e) { return err(e); } }
         @JavascriptInterface public String prepareEmpty(String ids) { try { return Trash.prepareEmpty(MainActivity.this, ids); } catch (Exception e) { return err(e); } }
         @JavascriptInterface public void confirmEmpty(String token) { runOnUiThread(() -> confirm(token, true)); }
+        @JavascriptInterface public String fleetConfig() { try { return Fleet.get(MainActivity.this).config(); } catch (Exception e) { return "{}"; } }
+        @JavascriptInterface public void fleetSave(String json) { try { Fleet.get(MainActivity.this).save(json); } catch (Exception ignored) { } }
+        @JavascriptInterface public String fleetStatus() { return Fleet.get(MainActivity.this).status(); }
+        @JavascriptInterface public void fleetPush() { Fleet.get(MainActivity.this).pushAsync(); }
+        @JavascriptInterface public String localByFp(String fps) { try { return db().localByFp(fps); } catch (Exception e) { return "{}"; } }
+        /** Runs a fleet request off the main thread and hands the answer back to fcNet(id, code, body). */
+        @JavascriptInterface public void fleetRequest(String method, String path, int id) {
+            new Thread(() -> {
+                Fleet.Reply r = Fleet.get(MainActivity.this).request(method, path, null, false);
+                runOnUiThread(() -> web.evaluateJavascript("window.fcNet && fcNet(" + id + "," + r.code + "," + JSONObject.quote(r.body) + ")", null));
+            }).start();
+        }
         @JavascriptInterface public void open(String path) { runOnUiThread(() -> openFile(path)); }
         @JavascriptInterface public String version() {
             try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "?"; }

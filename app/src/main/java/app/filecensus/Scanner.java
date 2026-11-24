@@ -44,7 +44,7 @@ public final class Scanner {
     private volatile long walked, changed, enriched, toEnrich, removed;
     private volatile long started, finished;
     private volatile String error = "";
-    private volatile long dupSizes, dupDone, hashedBytes;
+    private volatile long dupSizes, dupDone, hashedBytes, fpTotal, fpDone;
 
     private Scanner(Context c) { ctx = c; }
 
@@ -72,7 +72,8 @@ public final class Scanner {
                     .put("walked", walked).put("changed", changed).put("enriched", enriched)
                     .put("toEnrich", toEnrich).put("removed", removed)
                     .put("started", started).put("finished", finished).put("error", error)
-                    .put("dupSizes", dupSizes).put("dupDone", dupDone).put("hashedBytes", hashedBytes).toString();
+                    .put("dupSizes", dupSizes).put("dupDone", dupDone).put("hashedBytes", hashedBytes)
+                    .put("fpTotal", fpTotal).put("fpDone", fpDone).toString();
         } catch (JSONException e) {
             return "{}";
         }
@@ -96,6 +97,62 @@ public final class Scanner {
             }
         }
         return out;
+    }
+
+    /** Quick fingerprint so the same file can be recognized on another phone: size plus the first and last 16 KB. */
+    private void fingerprint(SQLiteDatabase db) {
+        phase = "fingerprinting";
+        List<String[]> todo = new ArrayList<>();
+        try (Cursor c = db.rawQuery("SELECT path, size FROM files WHERE fp IS NULL AND size > 0 ORDER BY mtime DESC", null)) {
+            while (c.moveToNext()) todo.add(new String[]{c.getString(0), String.valueOf(c.getLong(1))});
+        }
+        fpTotal = todo.size();
+        fpDone = 0;
+        int batch = 0;
+        db.beginTransaction();
+        try {
+            for (String[] row : todo) {
+                current = row[0];
+                String fp = quickPrint(new File(row[0]), Long.parseLong(row[1]));
+                if (fp != null) {
+                    ContentValues v = new ContentValues();
+                    v.put("fp", fp);
+                    db.update("files", v, "path=?", new String[]{row[0]});
+                }
+                fpDone++;
+                if (++batch >= 200) { db.setTransactionSuccessful(); db.endTransaction(); db.beginTransaction(); batch = 0; }
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    static String quickPrint(File f, long size) {
+        final int edge = 16384;
+        try (java.io.RandomAccessFile r = new java.io.RandomAccessFile(f, "r")) {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+            for (int i = 7; i >= 0; i--) md.update((byte) (size >>> (i * 8)));
+            byte[] buf = new byte[edge];
+            int n = (int) Math.min(edge, size);
+            r.readFully(buf, 0, n);
+            md.update(buf, 0, n);
+            if (size > 2L * edge) {
+                r.seek(size - edge);
+                r.readFully(buf, 0, edge);
+                md.update(buf, 0, edge);
+            } else if (size > edge) {
+                int rest = (int) (size - edge);
+                r.readFully(buf, 0, rest);
+                md.update(buf, 0, rest);
+            }
+            byte[] d = md.digest();
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 12; i++) sb.append(String.format(java.util.Locale.US, "%02x", d[i] & 0xff));
+            return sb.toString();
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void runDupes() {
@@ -203,6 +260,8 @@ public final class Scanner {
                 while (c.moveToNext()) known.put(c.getString(0), new long[]{c.getLong(1), c.getLong(2)});
             }
 
+            java.util.Set<String> trashedOrigs = new java.util.HashSet<>();
+            try (Cursor c = db.rawQuery("SELECT orig FROM trash", null)) { while (c.moveToNext()) trashedOrigs.add(c.getString(0)); }
             phase = "walking folders";
             SQLiteStatement touch = db.compileStatement("UPDATE files SET seen=? WHERE path=?");
             SQLiteStatement upsert = db.compileStatement("INSERT OR REPLACE INTO files " +
@@ -225,6 +284,7 @@ public final class Scanner {
                             if (f.isDirectory()) { stack.push(f); continue; }
                             walked++;
                             String path = f.getAbsolutePath();
+                            if (!trashedOrigs.isEmpty() && trashedOrigs.contains(path)) Trash.flagReturned(db, path);
                             long size = f.length();
                             long mtime = f.lastModified();
                             long[] k = known.remove(path);
@@ -327,7 +387,11 @@ public final class Scanner {
                 db.endTransaction();
             }
             findDupes(db);
+            Fleet fleet = Fleet.get(ctx);
+            if (fleet.enabled()) fingerprint(db);
+            fleet.noteCensus();
             phase = "done";
+            if (fleet.autoPush()) fleet.pushAsync();
         } catch (Throwable t) {
             error = t.getClass().getSimpleName() + ": " + t.getMessage();
             phase = "stopped";

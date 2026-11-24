@@ -27,7 +27,7 @@ public class Db extends SQLiteOpenHelper {
     }
 
     private Db(Context c) {
-        super(c, "filecensus.db", null, 4);
+        super(c, "filecensus.db", null, 5);
         setWriteAheadLoggingEnabled(true);
     }
 
@@ -38,7 +38,8 @@ public class Db extends SQLiteOpenHelper {
                 "size INTEGER, mtime INTEGER, ctime INTEGER, taken INTEGER, dt INTEGER, " +
                 "hint TEXT, lat REAL, lon REAL, camera TEXT, width INTEGER, height INTEGER, " +
                 "duration INTEGER, ai INTEGER DEFAULT 0, ai_info TEXT, shot INTEGER DEFAULT 0, " +
-                "shot_info TEXT, meta TEXT, done INTEGER DEFAULT 0, seen INTEGER DEFAULT 0, hash TEXT, phash TEXT)");
+                "shot_info TEXT, meta TEXT, done INTEGER DEFAULT 0, seen INTEGER DEFAULT 0, hash TEXT, phash TEXT, fp TEXT)");
+        db.execSQL("CREATE INDEX ix_fp ON files(fp)");
         db.execSQL("CREATE INDEX ix_hash ON files(hash)");
         db.execSQL("CREATE INDEX ix_size ON files(size)");
         db.execSQL("CREATE INDEX ix_kind ON files(kind)");
@@ -66,6 +67,11 @@ public class Db extends SQLiteOpenHelper {
         }
         if (oldV < 3) createLooks(db);
         if (oldV < 4) Trash.createTable(db);
+        if (oldV < 5) {
+            if (oldV >= 4) db.execSQL("ALTER TABLE trash ADD COLUMN note TEXT");
+            db.execSQL("ALTER TABLE files ADD COLUMN fp TEXT");
+            db.execSQL("CREATE INDEX IF NOT EXISTS ix_fp ON files(fp)");
+        }
     }
 
     static final String LOOK = "(SELECT IFNULL(color,'')||'|'||IFNULL(shape,'')||'|'||IFNULL(label,'')||'|'||IFNULL(size,1)||'|'||IFNULL(fx,'') FROM looks l WHERE l.path=files.path)";
@@ -163,6 +169,23 @@ public class Db extends SQLiteOpenHelper {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT path FROM files" + w + order(f.optString("sort")) +
                 " LIMIT " + Math.max(1, Math.min(20000, limit)), args.toArray(new String[0]))) {
             while (c.moveToNext()) out.put(c.getString(0));
+        }
+        return out.toString();
+    }
+
+    /** Local files matching fleet fingerprints, so remote results can say "also on this phone". */
+    public String localByFp(String fpsJson) throws JSONException {
+        JSONArray fps = new JSONArray(fpsJson);
+        JSONObject out = new JSONObject();
+        SQLiteDatabase db = getReadableDatabase();
+        for (int i = 0; i < fps.length() && i < 1000; i++) {
+            String fp = fps.getString(i);
+            if (fp.isEmpty()) continue;
+            try (Cursor c = db.rawQuery("SELECT path FROM files WHERE fp=? LIMIT 5", new String[]{fp})) {
+                JSONArray a = new JSONArray();
+                while (c.moveToNext()) a.put(c.getString(0));
+                if (a.length() > 0) out.put(fp, a);
+            }
         }
         return out.toString();
     }

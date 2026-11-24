@@ -46,7 +46,7 @@ public final class Trash {
 
     static void createTable(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE IF NOT EXISTS trash (id INTEGER PRIMARY KEY AUTOINCREMENT, orig TEXT, trashed TEXT, " +
-                "name TEXT, kind TEXT, size INTEGER, mtime INTEGER, deleted_at INTEGER, tags TEXT, look TEXT)");
+                "name TEXT, kind TEXT, size INTEGER, mtime INTEGER, deleted_at INTEGER, tags TEXT, look TEXT, note TEXT)");
     }
 
     private static String token() {
@@ -177,7 +177,8 @@ public final class Trash {
             String rel = path.substring(root.getAbsolutePath().length() + 1);
             File dest = new File(new File(trashRoot, String.valueOf(batch)), rel);
             if (dest.getParentFile() != null) dest.getParentFile().mkdirs();
-            if (!f.renameTo(dest)) { failed.put(new JSONObject().put("path", path).put("why", "Android refused the move")); continue; }
+            String why = move(ctx, f, dest, Long.parseLong(it[1]));
+            if (why != null) { failed.put(new JSONObject().put("path", path).put("why", why)); continue; }
             String tags = null, look = null, name = f.getName(), kind = Kinds.kind(Kinds.ext(name));
             try (Cursor c = db.rawQuery("SELECT (SELECT GROUP_CONCAT(tag_id) FROM file_tags t WHERE t.path=files.path), " + Db.LOOK +
                     ", kind FROM files WHERE path=?", new String[]{path})) {
@@ -210,13 +211,14 @@ public final class Trash {
     public static String list(Context ctx) throws JSONException {
         JSONArray out = new JSONArray();
         long total = 0;
-        try (Cursor c = Db.get(ctx).getReadableDatabase().rawQuery("SELECT id, orig, trashed, name, kind, size, mtime, deleted_at, look " +
+        try (Cursor c = Db.get(ctx).getReadableDatabase().rawQuery("SELECT id, orig, trashed, name, kind, size, mtime, deleted_at, look, note " +
                 "FROM trash ORDER BY deleted_at DESC, orig", null)) {
             while (c.moveToNext()) {
                 out.put(new JSONObject().put("id", c.getLong(0)).put("path", c.getString(1)).put("trashed", c.getString(2))
                         .put("name", c.getString(3)).put("kind", c.getString(4)).put("size", c.getLong(5))
                         .put("mtime", c.getLong(6)).put("deleted", c.getLong(7)).put("look", c.isNull(8) ? "" : c.getString(8))
-                        .put("ext", Kinds.ext(c.getString(3))).put("there", new File(c.getString(2)).isFile()));
+                        .put("ext", Kinds.ext(c.getString(3))).put("there", new File(c.getString(2)).isFile())
+                        .put("note", c.isNull(9) ? "" : c.getString(9)).put("origThere", new File(c.getString(1)).exists()));
                 total += c.getLong(5);
             }
         }
@@ -243,7 +245,8 @@ public final class Trash {
                     do { dest = new File(dest.getParentFile(), base + " (restored" + (k > 1 ? " " + k : "") + ")" + ext); k++; } while (dest.exists());
                 }
                 if (dest.getParentFile() != null) dest.getParentFile().mkdirs();
-                if (!src.renameTo(dest)) { failed.put(new JSONObject().put("path", orig).put("why", "Android refused the move")); continue; }
+                String why = move(ctx, src, dest, src.length());
+                if (why != null) { failed.put(new JSONObject().put("path", orig).put("why", why)); continue; }
                 String back = dest.getAbsolutePath();
                 if (tags != null) for (String t : tags.split(",")) { try { Db.get(ctx).setTag(back, Long.parseLong(t), true); } catch (NumberFormatException ignored) { } }
                 if (look != null && !look.isEmpty()) {
@@ -289,20 +292,72 @@ public final class Trash {
         SQLiteDatabase db = Db.get(ctx).getWritableDatabase();
         int gone = 0;
         long bytes = 0;
+        JSONArray failed = new JSONArray();
         for (String[] it : plan.items) {
-            try (Cursor c = db.rawQuery("SELECT trashed, size FROM trash WHERE id=?", new String[]{it[0]})) {
+            try (Cursor c = db.rawQuery("SELECT trashed, size, orig FROM trash WHERE id=?", new String[]{it[0]})) {
                 if (!c.moveToFirst()) continue;
                 File f = new File(c.getString(0));
                 if (!inTrash(f.getAbsolutePath())) continue; // only ever removes files inside the trash folder
-                if (!f.exists() || f.delete()) {
-                    db.delete("trash", "id=?", new String[]{it[0]});
-                    gone++;
-                    bytes += c.getLong(1);
-                    pruneEmpty(f.getParentFile());
-                }
+                String why = erase(ctx, f);
+                if (why != null) { failed.put(new JSONObject().put("path", c.getString(2)).put("why", why)); continue; }
+                db.delete("trash", "id=?", new String[]{it[0]});
+                gone++;
+                bytes += c.getLong(1);
+                pruneEmpty(f.getParentFile());
             }
         }
-        return out.put("removed", gone).put("bytes", bytes).toString();
+        return out.put("removed", gone).put("bytes", bytes).put("failed", failed).toString();
+    }
+
+    /**
+     * Moves a file and then checks the disk, because a rename that reports success is not proof.
+     * Returns null when the file is at dest and gone from src, otherwise the reason it failed,
+     * with src left exactly as it was.
+     */
+    static String move(Context ctx, File src, File dest, long size) {
+        String err = null;
+        try {
+            java.nio.file.Files.move(src.toPath(), dest.toPath());
+        } catch (Exception e) {
+            err = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage());
+            if (!src.renameTo(dest)) {
+                if (!dest.exists()) return "Android refused the move (" + err + ")";
+            }
+        }
+        boolean srcThere = src.exists(), destThere = dest.isFile();
+        if (!destThere) return srcThere ? "Android refused the move" : "the file disappeared during the move";
+        if (srcThere) {
+            // the storage layer copied instead of moving; finish the move or undo the copy
+            if (dest.length() == size && deleteHard(ctx, src) && !src.exists()) return null;
+            deleteHard(ctx, dest);
+            return "Android kept the original in place, so it was left alone";
+        }
+        return null;
+    }
+
+    /** Erases a trashed file and checks it is really gone. Falls back to MediaStore when a plain delete is refused. */
+    static String erase(Context ctx, File f) {
+        if (!f.exists()) return null;
+        if (deleteHard(ctx, f) && !f.exists()) return null;
+        return "Android refused to erase it";
+    }
+
+    private static boolean deleteHard(Context ctx, File f) {
+        try { java.nio.file.Files.deleteIfExists(f.toPath()); } catch (Exception ignored) { }
+        if (!f.exists()) return true;
+        if (f.delete() && !f.exists()) return true;
+        try {
+            ctx.getContentResolver().delete(android.provider.MediaStore.Files.getContentUri("external"),
+                    android.provider.MediaStore.MediaColumns.DATA + "=?", new String[]{f.getAbsolutePath()});
+        } catch (Exception ignored) { }
+        return !f.exists();
+    }
+
+    /** Called by the census: a trashed file whose original path is back on disk gets flagged so it shows in the Trash tab. */
+    static void flagReturned(SQLiteDatabase db, String path) {
+        ContentValues v = new ContentValues();
+        v.put("note", "A file is back at its original path. Either Android copied it instead of moving it, or the app that owns it made it again.");
+        db.update("trash", v, "orig=?", new String[]{path});
     }
 
     private static void pruneEmpty(File dir) {

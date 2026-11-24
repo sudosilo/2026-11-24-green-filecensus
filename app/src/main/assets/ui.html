@@ -162,7 +162,7 @@ table.list tr.kept td { color: #808080; text-decoration: line-through; }
 const FCB = window.FC;
 const TABS = [
   ["catalog", "Catalog"], ["date", "By Date"], ["type", "By Type"], ["timeline", "Timeline"],
-  ["ai", "AI and Provenance"], ["shots", "Screenshots"], ["dupes", "Duplicates"], ["viz", "Visualize"], ["tags", "Tags"], ["trash", "Trash"], ["stats", "Statistics"]
+  ["ai", "AI and Provenance"], ["shots", "Screenshots"], ["dupes", "Duplicates"], ["viz", "Visualize"], ["tags", "Tags"], ["trash", "Trash"], ["fleet", "Fleet"], ["stats", "Statistics"]
 ];
 const KINDS = { image: "Images", video: "Videos", audio: "Audio", document: "Documents", text: "Text", code: "Code and data files", archive: "Archives", apk: "Android apps", data: "Databases, fonts and other data", other: "Other files" };
 const COLORS = ["orange", "blue", "red", "green", "purple", "yellow", "navy", "teal", "pink", "gray"];
@@ -241,7 +241,7 @@ function drawTabs() {
 }
 function drawTools() {
   const el = document.getElementById("tools");
-  if (["tags", "stats", "timeline", "dupes", "viz", "trash"].includes(S.view) && !S.f.from) { el.classList.add("hide"); return; }
+  if (["tags", "stats", "timeline", "dupes", "viz", "trash", "fleet"].includes(S.view) && !S.f.from) { el.classList.add("hide"); return; }
   el.classList.remove("hide");
   const kindOpts = `<option value="">All types</option>` + Object.keys(KINDS).map(k => `<option value="${k}" ${S.f.kind === k ? "selected" : ""}>${KINDS[k]}</option>`).join("");
   const tagOpts = `<option value="0">Any tag</option><option value="-1" ${S.f.untagged ? "selected" : ""}>Untagged</option>` + tagList.map(t => `<option value="${t.id}" ${+S.f.tag === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
@@ -304,10 +304,12 @@ function drawScan() {
   if (st.running) {
     const pct = st.phase === "walking folders" ? 0
       : st.phase === "reading metadata" ? (st.toEnrich ? Math.round(100 * st.enriched / st.toEnrich) : 0)
-      : st.phase === "finding duplicates" ? (st.dupSizes ? Math.round(100 * st.dupDone / st.dupSizes) : 0) : 0;
+      : st.phase === "finding duplicates" ? (st.dupSizes ? Math.round(100 * st.dupDone / st.dupSizes) : 0)
+      : st.phase === "fingerprinting" ? (st.fpTotal ? Math.round(100 * st.fpDone / st.fpTotal) : 0) : 0;
     const word = st.phase === "walking folders" ? "Listing " + st.walked.toLocaleString()
       : st.phase === "reading metadata" ? "Reading " + pct + "%"
-      : st.phase === "finding duplicates" ? "Duplicates " + pct + "%" : "Working";
+      : st.phase === "finding duplicates" ? "Duplicates " + pct + "%"
+      : st.phase === "fingerprinting" ? "Fingerprints " + pct + "%" : "Working";
     btn.innerHTML = `<span>${esc(word)}</span><i style="width:${st.phase === "walking folders" ? 100 : pct}%" class="${st.phase === "walking folders" ? "busy" : ""}"></i>`;
     btn.classList.add("down");
     btn.title = st.current || "";
@@ -1220,7 +1222,7 @@ function trashView() {
     }
     const lk = it.look ? lookOf(it) : null;
     h += `<tr><td style="width:26px"><input type="checkbox" ${trashSel.has(it.id) ? "checked" : ""} onchange="this.checked?trashSel.add(${it.id}):trashSel.delete(${it.id})" style="width:20px;height:20px"></td>` +
-      `<td>${lk ? symImg(lk, 16) : ""}<b>${esc(it.name)}</b>${nickHtml(lk)}<div class="note">was in ${esc(it.path.slice(0, it.path.lastIndexOf("/")).replace(/^\/storage\/emulated\/0/, "Internal"))}${it.there ? "" : " | missing from the trash folder"}</div></td><td class="r">${esc(size(it.size))}</td></tr>`;
+      `<td>${lk ? symImg(lk, 16) : ""}<b>${esc(it.name)}</b>${nickHtml(lk)}<div class="note">was in ${esc(it.path.slice(0, it.path.lastIndexOf("/")).replace(/^\/storage\/emulated\/0/, "Internal"))}${it.there ? "" : " | missing from the trash folder"}</div>${it.note || it.origThere ? `<div class="note" style="color:#d00000">${esc(it.note || "A file with the same name is back in the original folder.")}</div>` : ""}</td><td class="r">${esc(size(it.size))}</td></tr>`;
   }
   if (batch !== null) h += `</table>`;
   if (!t.items.length) h += `<p class="pending">The trash is empty.</p>`;
@@ -1249,6 +1251,132 @@ function emptyTrash(all) {
     `<div class="row" style="margin-top:10px"><a class="btn go" style="background:#d00000;border-color:#ff8080 #600000 #600000 #ff8080" onclick="FCB.confirmEmpty('${r.token}')">Erase ${r.count.toLocaleString()} files</a><a class="btn" onclick="trashView()">Cancel</a></div>` +
     `<div class="note">Android will ask you once more before anything is erased.</div>`;
   window.scrollTo(0, 0);
+}
+
+// ------------------------------------------------------------------ fleet: every phone's census in one index
+const PHONE_COLORS = { green: "#00a000", blue: "#1084d0", orange: "#ff8000", red: "#d00000", purple: "#8000c0", yellow: "#e0c000", pink: "#ff40a0", teal: "#008080", gray: "#808080" };
+let netSeq = 0;
+const netWait = {};
+window.fcNet = function (id, code, body) {
+  const cb = netWait[id]; delete netWait[id];
+  let j = null; try { j = JSON.parse(body); } catch (e) { j = { error: body || "no answer" }; }
+  if (cb) cb(code, j);
+};
+function fleetGet(path, cb) { const id = ++netSeq; netWait[id] = cb; call("fleetRequest", "GET", path, id); }
+function fleetDel(path, cb) { const id = ++netSeq; netWait[id] = cb; call("fleetRequest", "DELETE", path, id); }
+let fleetState = { setup: false, q: "", kind: "", device: "", devices: [] };
+function phoneChip(name, color) { return `<span class="chip" style="background:${PHONE_COLORS[color] || "#808080"}">${esc(name)}</span>`; }
+
+function fleetView() {
+  const cfg = J("fleetConfig") || {};
+  const main = document.getElementById("main");
+  let h = `<h1 class="pg">Fleet</h1><div class="crumb">Every phone pushes its census to your fleet server. Search them all from here to find which phone holds what.</div>`;
+  if (!cfg.enabled || fleetState.setup) {
+    h += `<div class="box"><h3>${cfg.enabled ? "Fleet settings" : "Join this phone to the fleet"}</h3><div class="in">` +
+      `<div class="row"><label style="width:90px">Server</label><input type="text" id="fl_url" style="width:200px" value="${esc(cfg.url || "")}" placeholder="your-app.up.railway.app"></div>` +
+      `<div class="row"><label style="width:90px">Fleet key</label><input type="text" id="fl_key" style="width:200px" value="" placeholder="${cfg.hasKey ? "saved " + esc(cfg.keyHint) + ", leave blank to keep" : "fk_ followed by 40 letters"}"></div>` +
+      `<div class="row"><label style="width:90px">This phone</label><input type="text" id="fl_name" style="width:200px" value="${esc(cfg.name || "")}"></div>` +
+      `<div class="row"><label style="width:90px">Its color</label><span class="swatches">${Object.keys(PHONE_COLORS).map(c => `<a class="${cfg.color === c ? "on" : ""}" data-c="${c}" style="background:${PHONE_COLORS[c]}" onclick="document.querySelectorAll('[data-c]').forEach(x=>x.classList.toggle('on',x===this))"></a>`).join("")}</span></div>` +
+      `<div class="row"><label><input type="checkbox" id="fl_auto" ${cfg.auto ? "checked" : ""}> Push automatically after every census</label></div>` +
+      `<div class="row"><a class="btn go" onclick="fleetSaveForm()">Save and test</a>${cfg.enabled ? `<a class="btn" onclick="fleetState.setup=false;fleetView()">Close</a>` : ""}<span class="note" id="fl_msg"></span></div>` +
+      `<div class="note">Model: ${esc(cfg.model || "")}. Phone ID: ${esc(cfg.id || "")}.</div></div></div>`;
+    main.innerHTML = h;
+    return;
+  }
+  const st = J("fleetStatus") || {};
+  h += `<div class="order"><div class="row" style="margin:0">${phoneChip(cfg.name, cfg.color)}<span class="note">${esc(cfg.model)}</span></div>` +
+    `<div id="fl_push">${pushLine(st)}</div>` +
+    `<div class="row"><a class="btn go" onclick="fleetPushNow()">Push this phone now</a><a class="btn" onclick="fleetState.setup=true;fleetView()">Settings</a></div></div>`;
+  h += `<h2 class="sec">Search every phone</h2>` +
+    `<div class="row"><input type="text" id="fl_q" style="width:170px" placeholder="name, folder, or nickname" value="${esc(fleetState.q)}" onkeydown="if(event.key==='Enter')fleetSearch()">` +
+    `<select id="fl_kind"><option value="">All types</option>${Object.keys(KINDS).map(k => `<option value="${k}" ${fleetState.kind === k ? "selected" : ""}>${KINDS[k]}</option>`).join("")}</select>` +
+    `<select id="fl_dev"><option value="">All phones</option></select><a class="btn go" onclick="fleetSearch()">Search</a></div><div id="fl_res"></div>` +
+    `<h2 class="sec">Phones in the fleet</h2><div id="fl_devs"><p class="pending">Asking the server...</p></div>`;
+  main.innerHTML = h;
+  fleetGet("/v1/devices", (code, j) => {
+    const box = document.getElementById("fl_devs");
+    if (!box) return;
+    if (code !== 200) { box.innerHTML = `<p class="note" style="color:#d00000">${esc(j.error || "Server answered " + code)}</p>`; return; }
+    fleetState.devices = j.devices || [];
+    const sel = document.getElementById("fl_dev");
+    sel.innerHTML = `<option value="">All phones</option>` + fleetState.devices.map(d => `<option value="${esc(d.id)}" ${fleetState.device === d.id ? "selected" : ""}>${esc(d.name)}</option>`).join("");
+    if (!fleetState.devices.length) { box.innerHTML = `<p class="pending">No phone has pushed yet. Tap "Push this phone now".</p>`; return; }
+    box.innerHTML = `<table class="list"><tr><th>Phone</th><th class="r">Files</th><th class="r">Size</th></tr>` + fleetState.devices.map(d =>
+      `<tr><td>${phoneChip(d.name, d.color)}${d.id === cfg.id ? ` <span class="badge gps" style="animation:none">THIS PHONE</span>` : ""}<div class="note">${esc(d.model || "")} | pushed ${esc(dtstr(d.pushedAt))}</div>` +
+      `<div class="note"><a onclick="fleetState.device='${esc(d.id)}';document.getElementById('fl_dev').value='${esc(d.id)}';fleetSearch()">browse</a> | <a id="rm_${esc(d.id)}" onclick="fleetRemove('${esc(d.id)}')">remove from the index</a></div></td>` +
+      `<td class="r">${(d.files || 0).toLocaleString()}</td><td class="r">${esc(size(d.bytes || 0))}</td></tr>`).join("") + `</table>` +
+      `<div class="note">Removing a phone only clears its entry on the server. No files are touched on any phone.</div>`;
+  });
+  if (fleetState.q || fleetState.device || fleetState.kind) fleetSearch();
+}
+function pushLine(st) {
+  if (st.pushing) return `<b>Pushing:</b> ${esc(st.phase)} ${st.total ? (st.sent || 0).toLocaleString() + " of " + st.total.toLocaleString() + " files" : ""}<div class="meter"><i style="width:${st.total ? 100 * st.sent / st.total : 5}%"></i></div>`;
+  return (st.lastPush ? `Last push ${esc(dtstr(st.lastPush))}.` : `This phone has not pushed yet.`) + (st.error ? ` <span style="color:#d00000">Last try failed: ${esc(st.error)}</span>` : "");
+}
+function fleetSaveForm() {
+  const c = document.querySelector("[data-c].on");
+  call("fleetSave", JSON.stringify({ url: document.getElementById("fl_url").value, key: document.getElementById("fl_key").value,
+    name: document.getElementById("fl_name").value, color: c ? c.getAttribute("data-c") : "green", auto: document.getElementById("fl_auto").checked }));
+  const msg = document.getElementById("fl_msg");
+  msg.textContent = "Testing...";
+  fleetGet("/v1/devices", (code, j) => {
+    if (code === 200) { msg.textContent = "Connected. " + (j.devices || []).length + " phones in the index."; fleetState.setup = false; setTimeout(fleetView, 900); }
+    else msg.textContent = code === 401 ? "The server refused that fleet key." : (j.error || "Server answered " + code);
+  });
+}
+let pushTimer = null;
+function fleetPushNow() {
+  call("fleetPush");
+  clearInterval(pushTimer);
+  pushTimer = setInterval(() => {
+    const st = J("fleetStatus") || {}, el = document.getElementById("fl_push");
+    if (el) el.innerHTML = pushLine(st);
+    if (!st.pushing) { clearInterval(pushTimer); if (el && S.view === "fleet" && !st.error) setTimeout(fleetView, 400); }
+  }, 600);
+}
+function fleetRemove(id) {
+  const a = document.getElementById("rm_" + id);
+  if (a.dataset.arm !== "1") { a.dataset.arm = "1"; a.textContent = "tap again to remove this phone from the index"; a.style.color = "#d00000"; return; }
+  fleetDel("/v1/devices/" + encodeURIComponent(id), () => fleetView());
+}
+function fleetSearch() {
+  fleetState.q = document.getElementById("fl_q").value.trim();
+  fleetState.kind = document.getElementById("fl_kind").value;
+  fleetState.device = document.getElementById("fl_dev").value;
+  const box = document.getElementById("fl_res");
+  box.innerHTML = `<p class="pending">Searching...</p>`;
+  const qs = new URLSearchParams({ q: fleetState.q, kind: fleetState.kind, device: fleetState.device, limit: "300" });
+  fleetGet("/v1/search?" + qs, (code, j) => {
+    if (code !== 200) { box.innerHTML = `<p class="note" style="color:#d00000">${esc(j.error || "Server answered " + code)}</p>`; return; }
+    const here = J("localByFp", JSON.stringify([...new Set((j.items || []).map(i => i.fp).filter(Boolean))])) || {};
+    const cfg = J("fleetConfig") || {};
+    const names = {}; fleetState.devices.forEach(d => names[d.id] = d);
+    let h = `<div class="crumb"><b>${(j.total || 0).toLocaleString()}</b> matches. ` + Object.keys(j.perPhone || {}).filter(k => j.perPhone[k]).map(k => `${esc((names[k] || {}).name || k)}: ${j.perPhone[k].toLocaleString()}`).join(", ") + `</div>`;
+    let dev = null;
+    for (const it of j.items || []) {
+      if (it.device !== dev) { if (dev !== null) h += `</table>`; dev = it.device; h += `<h2 class="sec" style="background:${PHONE_COLORS[it.color] || "#808080"}">${esc(it.phone)}${it.device === cfg.id ? "<small>this phone</small>" : ""}</h2><table class="list">`; }
+      const lk = FCBoard.lookFor({ kind: it.kind, look: "" });
+      const local = here[it.fp];
+      h += `<tr><td>${symImg(lk, 16)}<b>${esc(it.path.split("/").pop())}</b>${it.nick ? `<span class="nick" style="color:#000080">${esc(it.nick)}</span>` : ""}` +
+        `<div class="note">${esc(it.path.slice(0, it.path.lastIndexOf("/")).replace(/^\/storage\/emulated\/0/, "Internal"))} | ${esc(dtstr(it.dt || it.mtime))}</div>` +
+        (local && it.device !== cfg.id ? `<span class="badge gps" style="animation:none">ALSO ON THIS PHONE</span>` : "") + (it.ai ? `<span class="badge" style="animation:none">AI</span>` : "") +
+        `</td><td class="r">${esc(size(it.size))}</td></tr>`;
+    }
+    if (dev !== null) h += `</table>`;
+    if ((j.total || 0) > (j.items || []).length) h += `<div class="note">Showing the first ${(j.items || []).length}. Narrow the search to see the rest.</div>`;
+    box.innerHTML = h;
+  });
+}
+function whereIsFile(fp) {
+  const box = document.getElementById("dwhere");
+  if (!fp) { box.innerHTML = `<p class="note">This file has no fingerprint yet. It gets one in the next census after the fleet is set up.</p>`; return; }
+  box.innerHTML = `<p class="pending">Asking the fleet...</p>`;
+  fleetGet("/v1/where?fp=" + encodeURIComponent(fp), (code, j) => {
+    if (code !== 200) { box.innerHTML = `<p class="note" style="color:#d00000">${esc(j.error || "Server answered " + code)}</p>`; return; }
+    const list = (j.where || {})[fp] || [];
+    box.innerHTML = list.length ? `<table class="list">` + list.map(it => `<tr><td>${phoneChip(it.phone, it.color)}<div class="note">${esc(it.path)}</div></td><td class="r">${esc(size(it.size))}</td></tr>`).join("") + `</table>`
+      : `<p class="note">No phone in the fleet has reported this file yet, including this one. Push this phone to add it.</p>`;
+  });
 }
 
 // ------------------------------------------------------------------ detail
@@ -1290,6 +1418,7 @@ function openDetail(el) {
     viewerHtml(d) +
     `<div class="row" style="justify-content:center"><a class="btn go" onclick="FCB.open(detailOpen)">Open file</a><a class="btn" onclick="reviewDelete([detailOpen],'This file')">Delete</a><a class="btn" onclick="closeDetail()">Back</a></div>` +
     `<h2 class="sec">Tags</h2><div id="dtags">${tagHtml}</div>` +
+    ((J("fleetConfig") || {}).enabled ? `<h2 class="sec">Which phones have this file</h2><div id="dwhere"><a class="btn small" onclick="whereIsFile('${esc(d.fp || "")}')">Ask the fleet</a></div>` : "") +
     `<h2 class="sec">Look</h2>` + lookEditor({ path: d.path, kind: d.kind, look: d.look }) +
     `<h2 class="sec">Specifications</h2><table class="spec">${rows.join("")}</table>`;
   document.getElementById("tools").classList.add("hide");
@@ -1339,6 +1468,7 @@ function render(soft) {
     case "dupes": dupesView(); break;
     case "viz": vizView(); break;
     case "trash": trashView(); break;
+    case "fleet": fleetView(); break;
   }
 }
 
