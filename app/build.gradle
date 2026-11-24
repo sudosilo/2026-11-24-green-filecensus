@@ -1,0 +1,48 @@
+// GREEN PHONE EDIT
+plugins {
+    id 'com.android.application'
+}
+
+def runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
+
+android {
+    namespace 'app.filecensus'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'app.filecensus'
+        minSdk 26
+        targetSdk 34
+        versionCode runNumber
+        versionName "1.0." + runNumber
+    }
+
+    signingConfigs {
+        fixed {
+            storeFile file('filecensus.keystore')
+            storePassword 'filecensus'
+            keyAlias 'filecensus'
+            keyPassword 'filecensus'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.fixed
+        }
+        debug {
+            signingConfig signingConfigs.fixed
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
