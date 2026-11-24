@@ -107,6 +107,18 @@ table.list td.r, table.list th.r { text-align: right; white-space: nowrap; }
 .more { text-align: center; padding: 12px 0; }
 #foot { text-align: center; font-size: 10px; color: #404040; padding: 10px; border-top: 1px solid #808080; background: #f4f4f4; }
 .hide { display: none !important; }
+.sym { vertical-align: middle; margin-right: 4px; }
+.nick { display: block; font-weight: bold; font-size: 12px; font-family: Tahoma, Verdana, sans-serif; }
+.gsym { position: absolute; bottom: 18px; left: 5px; z-index: 2; background: rgba(255,255,255,.85); border: 1px solid #808080; line-height: 0; padding: 1px; }
+.symgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(62px, 1fr)); gap: 4px; margin: 4px 0; }
+.symgrid a { display: flex; flex-direction: column; align-items: center; padding: 3px 2px; background: #fff; border: 2px solid; border-color: #fff #404040 #404040 #fff; font-size: 9px; color: #000080; text-decoration: none; }
+.symgrid a.on { border-color: #404040 #fff #fff #404040; background: #ffffcc; outline: 2px dotted #000080; outline-offset: -4px; }
+.symgrid .sym { margin: 0 0 1px; }
+.legrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 10px; font-size: 11px; }
+.legrid span, .legrid a { display: flex; align-items: center; gap: 5px; text-decoration: none; }
+.legrid svg, .legrid img { flex-shrink: 0; }
+#bwrap.bfull { position: fixed; inset: 0; z-index: 60; background: #f4f7f2; }
+#bwrap.bfull canvas { border: 0 !important; }
 .monitor .scr.vfull { position: fixed; inset: 0; padding-top: 0; z-index: 60; border: 0; }
 .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
 .note { font-size: 11px; color: #404040; }
@@ -131,7 +143,7 @@ table.list td.r, table.list th.r { text-align: right; white-space: nowrap; }
     <div style="margin-top:4px">FileCensus. Everything stays on this phone. Nothing is uploaded.</div>
   </div>
 </div>
-<script src="circuit.js"></script>
+<script src="board.js"></script>
 <script>
 // GREEN PHONE EDIT
 "use strict";
@@ -254,6 +266,7 @@ function go(view, extra) {
   render();
 }
 window.fcBack = function () {
+  if (boardFull) { boardFullToggle(); return true; }
   if (vfullOpen) { vizFull(); return true; }
   if (fullOpen) { closeFull(); return true; }
   if (detailOpen) { closeDetail(); return true; }
@@ -303,8 +316,11 @@ function poll() {
     const now = Date.now();
     if (!st.running) {
       clearInterval(pollTimer);
-      if (!detailOpen && !fullOpen) render();
-    } else if (S.view === "dupes" && st.phase === "finding duplicates" && now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200) {
+      if (!detailOpen && !fullOpen && !boardFull) render();
+      return;
+    }
+    if (curBoard && S.view === "viz") curBoard.scan(st);
+    if (S.view === "dupes" && st.phase === "finding duplicates" && now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200) {
       lastRefresh = now; dupesView();
     } else if (now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200 && document.getElementById("list")) {
       lastRefresh = now; render(true);
@@ -352,12 +368,13 @@ function groupHead(it, key) {
 }
 function itemHtml(it) {
   const age = ageClass(it.dt);
+  const lk = it.look ? lookOf(it) : null, ring = lk ? ` style="border-color:${lk.color};background:${lk.color}"` : "";
   if (S.mode === "grid") {
-    return `<a class="frame" onclick="openDetail(this)" data-p="${esc(it.path)}"><span class="dot ${age}"></span>${it.ai ? '<span class="badge ai">AI</span>' : ""}<div class="scr">${art(it)}</div><div class="cap">${esc(it.name)}</div></a>`;
+    return `<a class="frame" onclick="openDetail(this)" data-p="${esc(it.path)}"${ring}><span class="dot ${age}"></span>${it.ai ? '<span class="badge ai">AI</span>' : ""}${lk ? `<span class="gsym">${symImg(lk, 22)}</span>` : ""}<div class="scr">${art(it)}</div><div class="cap"${lk ? ` style="color:#fff;font-weight:bold"` : ""}>${esc(lk && lk.label ? lk.label : it.name)}</div></a>`;
   }
   const badges = (it.ai ? '<span class="badge ai">AI</span>' : "") + (it.shot ? '<span class="badge shot">SCREENSHOT</span>' : "") + (it.gps ? '<span class="badge gps">GPS</span>' : "");
-  return `<div class="prod"><div class="shot"><a class="frame" onclick="openDetail(this)" data-p="${esc(it.path)}"><div class="scr">${art(it)}</div><div class="cap">${esc(it.ext ? it.ext.toUpperCase() : "FILE")} ${esc(size(it.size))}</div></a></div>` +
-    `<div class="info"><div class="nm"><span class="age ${age}"></span><a onclick="openDetail(this)" data-p="${esc(it.path)}">${esc(it.name)}</a></div>` +
+  return `<div class="prod"><div class="shot"><a class="frame" onclick="openDetail(this)" data-p="${esc(it.path)}"${ring}><div class="scr">${art(it)}</div><div class="cap"${lk ? ` style="color:#fff;font-weight:bold"` : ""}>${esc(it.ext ? it.ext.toUpperCase() : "FILE")} ${esc(size(it.size))}</div></a></div>` +
+    `<div class="info"><div class="nm">${lk ? symImg(lk, 18) : `<span class="age ${age}"></span>`}<a onclick="openDetail(this)" data-p="${esc(it.path)}">${esc(it.name)}</a></div>${nickHtml(lk)}` +
     `<div class="tg">${esc(it.hint)}</div>` +
     `<div class="meta">${esc(dtstr(it.dt))} | ${esc(size(it.size))} | ${esc(KINDS[it.kind] || it.kind)} | ${esc(it.parent.replace(/^\/storage\/emulated\/0/, "Internal"))}</div>` +
     `<div>${badges}${chips(it.tags)}</div></div></div>`;
@@ -367,7 +384,8 @@ function listView(title, blurb) {
   const main = document.getElementById("main");
   const legend = `<div class="legend"><span><b class="a0"></b>under 7d</span><span><b class="a1"></b>7 to 30d</span><span><b class="a2"></b>30 to 60d</span><span><b class="a3"></b>60 to 90d</span><span><b class="a4"></b>90d+</span></div>`;
   const tagBulk = tagList.length ? `<div class="row"><select id="bulktag">${tagList.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select><a class="btn small" onclick="bulkTag(true)">Tag all results</a><a class="btn small" onclick="bulkTag(false)">Untag all results</a><span class="note" id="bulkmsg"></span></div>` : "";
-  main.innerHTML = `<h1 class="pg">${esc(title)}</h1><div class="crumb" id="crumb">${blurb || ""}</div>${legend}<div id="list"></div><div class="more" id="more"></div>${tagBulk}`;
+  const lookBulk = `<div class="row"><a class="btn small" onclick="bulkLookOpen()">Give all results one look</a></div><div id="bulklook"></div>`;
+  main.innerHTML = `<h1 class="pg">${esc(title)}</h1><div class="crumb" id="crumb">${blurb || ""}</div>${legend}<div id="list"></div><div class="more" id="more"></div>${tagBulk}${lookBulk}`;
   page = { offset: 0, total: 0, lastKey: null, loading: false, done: false };
   loadMore();
 }
@@ -572,13 +590,14 @@ function tagExtras(gid) {
 }
 
 // ------------------------------------------------------------------ visualizers
-const VIZ = [["storage", "Storage map"], ["types", "Types"], ["calendar", "Calendar"], ["sizes", "Sizes"], ["places", "Places"]];
+const VIZ = [["board", "Board"], ["storage", "Storage map"], ["types", "Types"], ["calendar", "Calendar"], ["sizes", "Sizes"], ["places", "Places"]];
 const KCOL = { image: "#1084d0", video: "#ff8000", audio: "#8000c0", document: "#d00000", text: "#808080", code: "#000080", archive: "#e0c000", apk: "#00a000", data: "#008080", other: "#c0c0c0" };
 function vizView() {
-  const sub = S.f.viz || "storage";
+  const sub = S.f.viz || "board";
+  if (curBoard && sub !== "board") { curBoard.destroy(); curBoard = null; }
   const main = document.getElementById("main");
   main.innerHTML = `<h1 class="pg">Visualize</h1><div class="row">${VIZ.map(v => `<a class="btn small ${sub === v[0] ? "down" : ""}" onclick="S.f.viz='${v[0]}';vizView()">${v[1]}</a>`).join("")}</div><div id="viz"></div>`;
-  ({ storage: vizStorage, types: vizTypes, calendar: vizCalendar, sizes: vizSizes, places: vizPlaces })[sub]();
+  ({ board: vizBoard, storage: vizStorage, types: vizTypes, calendar: vizCalendar, sizes: vizSizes, places: vizPlaces })[sub]();
 }
 function vizStorage() {
   const root = S.f.root || call("home") || "/storage/emulated/0";
@@ -731,8 +750,181 @@ function vizPlaces() {
   };
 }
 
+// ------------------------------------------------------------------ looks
+const TAGHEX = { orange: "#ff8000", blue: "#1084d0", red: "#d00000", green: "#00a000", purple: "#8000c0", yellow: "#e0c000", navy: "#000080", teal: "#008080", pink: "#ff40a0", gray: "#808080" };
+function lookOf(it) { return window.FCBoard ? FCBoard.lookFor({ kind: it.kind, look: it.look }) : null; }
+function symImg(lk, px) { return `<img class="sym" src="${FCBoard.symbolURL(lk.shape, lk.color, px)}" width="${px}" height="${px}" alt="">`; }
+function nickHtml(lk) { return lk && lk.label ? `<span class="nick" style="color:${lk.color}">${esc(lk.label)}</span>` : ""; }
+
+// the editor, used on a file's page and for giving a whole result list one look
+let LE = null;
+function lookEditor(target) {
+  // target: { path } for one file, or { bulk: filter } for many
+  const d = target.look || {};
+  LE = { target, color: d.color || "", shape: d.shape || "", label: d.label || "", size: d.size === undefined ? 1 : d.size, fx: d.fx || "", kind: target.kind || "image" };
+  return `<div class="box" id="lookbox"><h3>${target.bulk ? "One look for every result" : "Look"}</h3><div class="in" id="lookin"></div></div>`;
+}
+function drawLookEditor() {
+  const box = document.getElementById("lookin");
+  if (!box || !LE) return;
+  const B = FCBoard, base = B.lookFor({ kind: LE.kind, look: "" });
+  const col = LE.color || base.color, shp = LE.shape || base.shape;
+  let h = `<div class="row" style="align-items:center;gap:10px"><canvas id="lookprev" style="width:150px;height:96px;border:2px solid;border-color:#808080 #fff #fff #808080;background:#f4f7f2"></canvas>` +
+    `<div class="note">${LE.target.bulk ? "Colors, symbol, size and effect go on every file in the list. Nicknames stay per file." : "This is how the file shows up on the Board, in lists and in grids. Give it something you will remember."}</div></div>`;
+  if (!LE.target.bulk) h += `<div class="row"><label>Nickname</label><input type="text" id="looklabel" maxlength="24" value="${esc(LE.label)}" placeholder="optional, up to 24 letters" oninput="LE.label=this.value;"></div>`;
+  h += `<div class="note" style="margin-top:4px"><b>Color</b></div><div class="swatches"><a title="Type color" onclick="LE.color='';drawLookEditor()" style="background:repeating-linear-gradient(45deg,#fff 0 4px,#c0c0c0 4px 8px)" class="${!LE.color ? "on" : ""}"></a>` +
+    B.COLORS.map(c => `<a onclick="LE.color='${c}';drawLookEditor()" style="background:${c}" class="${LE.color === c ? "on" : ""}"></a>`).join("") + `</div>`;
+  h += `<div class="note" style="margin-top:4px"><b>Symbol</b></div><div class="symgrid">` +
+    `<a class="${!LE.shape ? "on" : ""}" onclick="LE.shape='';drawLookEditor()">${symImg({ shape: base.shape, color: col }, 30)}<span>Type</span></a>` +
+    B.SHAPES.map(sp => `<a class="${LE.shape === sp[0] ? "on" : ""}" onclick="LE.shape='${sp[0]}';drawLookEditor()">${symImg({ shape: sp[0], color: col }, 30)}<span>${sp[1]}</span></a>`).join("") + `</div>`;
+  h += `<div class="note" style="margin-top:4px"><b>Size</b></div><div class="row" style="margin-top:2px">` + B.SIZES.map((z, i) => `<a class="btn small ${LE.size === i ? "down" : ""}" onclick="LE.size=${i};drawLookEditor()">${z}</a>`).join("") + `</div>`;
+  h += `<div class="note"><b>Effect</b></div><div class="row" style="margin-top:2px">` + B.EFFECTS.map(e => `<a class="btn small ${LE.fx === e[0] ? "down" : ""}" onclick="LE.fx='${e[0]}';drawLookEditor()">${e[1]}</a>`).join("") + `</div>`;
+  h += `<div class="row" style="margin-top:8px"><a class="btn go" onclick="saveLook()">${LE.target.bulk ? "Apply to all results" : "Save look"}</a><a class="btn" onclick="resetLook()">${LE.target.bulk ? "Clear looks from all results" : "Back to type default"}</a><span class="note" id="lookmsg"></span></div>`;
+  box.innerHTML = h;
+  previewLook();
+}
+function previewLook() {
+  const cv = document.getElementById("lookprev");
+  if (!cv || !LE) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1), W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext("2d");
+  cancelAnimationFrame(LE.raf);
+  const step = t => {
+    if (!document.body.contains(cv) || !LE) return;
+    const now = t / 1000, lk = FCBoard.lookFor({ kind: LE.kind, look: [LE.color, LE.shape, LE.label, LE.size, LE.fx].join("|") });
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = "#f4f7f2"; g.fillRect(0, 0, W, H);
+    g.strokeStyle = "rgba(40,100,140,0.6)"; g.lineWidth = 2; g.beginPath(); g.moveTo(0, H * 0.42); g.lineTo(W, H * 0.42); g.stroke();
+    let s = 15 * [0.7, 1, 1.45, 2][lk.size || 1], a = 1;
+    if (lk.fx === "pulse") s *= 1 + 0.14 * Math.sin(now * 3);
+    if (lk.fx === "blink" && Math.sin(now * 5) < -0.2) a = 0.2;
+    const x = W / 2, y = H * 0.42;
+    if (lk.fx === "glow") { const gr = g.createRadialGradient(x, y, s * 0.2, x, y, s * 1.9); gr.addColorStop(0, lk.color + "88"); gr.addColorStop(1, lk.color + "00"); g.fillStyle = gr; g.beginPath(); g.arc(x, y, s * 1.9, 0, 7); g.fill(); }
+    FCBoard.drawSymbol(g, lk.shape, x, y, s, lk.color, a);
+    if (lk.fx === "sparkle") for (let i = 0; i < 4; i++) { const an = now * 1.3 + i * 1.57, tw = 0.5 + 0.5 * Math.sin(now * 7 + i * 2); FCBoard.drawSymbol(g, "star", x + Math.cos(an) * s * 1.2, y + Math.sin(an) * s * 1.2, s * 0.22 * tw + 1, lk.color, tw); }
+    if (lk.fx === "orbit") { const oa = now * 2; g.fillStyle = lk.color; g.beginPath(); g.arc(x + Math.cos(oa) * s * 1.3, y + Math.sin(oa) * s * 0.7, Math.max(1.5, s * 0.14), 0, 7); g.fill(); }
+    if (LE.label && !LE.target.bulk) { g.fillStyle = lk.color; g.font = "bold 11px Tahoma"; g.textAlign = "center"; g.fillText(LE.label, x, y + s * 0.75 + 14); }
+    LE.raf = requestAnimationFrame(step);
+  };
+  LE.raf = requestAnimationFrame(step);
+}
+function saveLook() {
+  const look = JSON.stringify({ color: LE.color, shape: LE.shape, label: LE.label, size: LE.size, fx: LE.fx });
+  const msg = document.getElementById("lookmsg");
+  if (LE.target.bulk) {
+    const n = call("lookMatching", JSON.stringify(LE.target.bulk), look);
+    msg.textContent = (n || 0).toLocaleString() + " files restyled.";
+    setTimeout(() => render(), 900);
+  } else {
+    call("setLook", LE.target.path, look);
+    msg.textContent = "Saved.";
+  }
+}
+function resetLook() {
+  const msg = document.getElementById("lookmsg");
+  if (LE.target.bulk) {
+    const n = call("lookMatching", JSON.stringify(LE.target.bulk), "");
+    msg.textContent = (n || 0).toLocaleString() + " looks cleared.";
+    setTimeout(() => render(), 900);
+  } else {
+    call("clearLook", LE.target.path);
+    LE.color = ""; LE.shape = ""; LE.label = ""; LE.size = 1; LE.fx = "";
+    drawLookEditor();
+    document.getElementById("lookmsg").textContent = "Back to the type default.";
+  }
+}
+function bulkLookOpen() {
+  const host = document.getElementById("bulklook");
+  if (!host) return;
+  if (host.innerHTML) { host.innerHTML = ""; LE = null; return; }
+  const f = filterFor(); delete f.limit; delete f.offset;
+  host.innerHTML = lookEditor({ bulk: f, kind: S.f.kind || "image" });
+  drawLookEditor();
+}
+
+// ------------------------------------------------------------------ the Board
+let curBoard = null, boardFull = false;
+function tagColorOf(tags) {
+  const id = String(tags || "").split(",").filter(Boolean)[0];
+  const t = id && tagMap[id];
+  return t ? TAGHEX[t.color] || "#808080" : null;
+}
+function vizBoard() {
+  if (curBoard) { curBoard.destroy(); curBoard = null; }
+  const home = call("home") || "/storage/emulated/0";
+  const root = S.f.root || home;
+  const d = J("board", root) || {};
+  const box = document.getElementById("viz");
+  if (!d.count && !(d.kids || []).length) { box.innerHTML = `<p class="pending">This folder has nothing in the census yet.</p>`; return; }
+  const parts = root.split("/").filter(Boolean);
+  let crumb = "";
+  for (let i = 0; i < parts.length; i++) {
+    const p = "/" + parts.slice(0, i + 1).join("/");
+    crumb += (i ? " / " : "") + (p.length >= home.length ? `<a onclick='S.f.root=${JSON.stringify(p).replace(/'/g, "&#39;")};vizView()'>${esc(i ? parts[i] : parts[i])}</a>` : esc(parts[i]));
+  }
+  const tagOpts = `<option value="0">Highlight a tag</option>` + tagList.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
+  const looks = J("looks") || [];
+  const myLooks = looks.filter(l => l.path.indexOf(root === "/" ? "/" : root + "/") === 0 || l.path.slice(0, l.path.lastIndexOf("/")) === root).slice(0, 60);
+  const B = FCBoard;
+  box.innerHTML =
+    `<div class="crumb">${crumb} | ${esc(size(d.bytes || 0))}, ${(d.count || 0).toLocaleString()} files</div>` +
+    `<div class="row"><select id="btag" onchange="if(curBoard)curBoard.tag=+this.value">${tagOpts}</select><a class="btn small go" id="breplay" onclick="boardReplay()">Replay history</a><a class="btn small" onclick="boardFullToggle()">Full screen</a>` +
+    (root !== home ? `<a class="btn small" onclick="boardUp()">Up a folder</a>` : "") + `</div>` +
+    `<div id="bwrap" style="position:relative"><canvas id="bcv" style="width:100%;height:${Math.round(Math.min(window.innerHeight * 0.78, document.getElementById("main").clientWidth * 1.45))}px;display:block;border:2px solid;border-color:#808080 #fff #fff #808080;touch-action:pan-y"></canvas>` +
+    `<a class="btn small hide" id="bclose" onclick="boardFullToggle()" style="position:absolute;top:8px;right:8px;z-index:2">Close</a></div>` +
+    `<div class="note" id="bwin" style="margin-top:4px">Tap a chip to step into that folder, tap the core to go up, tap a part to open the file. Tap or drag across the LEDs at the bottom to show one stretch of time.</div>` +
+    (d.kids && d.kids.length > 26 ? `<div class="note">${(d.kids.length - 26).toLocaleString()} smaller folders are left off the board. The Storage map lists them all.</div>` : "") +
+    (d.hereCount > (d.files || []).length ? `<div class="note">This folder holds ${d.hereCount.toLocaleString()} files of its own. The board shows every file you have given a look or a tag, then the biggest ones.</div>` : "") +
+    `<h2 class="sec">Legend</h2><div class="legrid">` +
+    Object.keys(B.KIND_SHAPE).map(k => `<span>${symImg({ shape: B.KIND_SHAPE[k], color: B.KIND_COLOR[k] }, 22)}${esc(KINDS[k] || k)}</span>`).join("") +
+    `<span><svg width="22" height="22"><path d="M2 16 Q11 4 20 16" stroke="#d00000" stroke-width="2" stroke-dasharray="4 3" fill="none"/></svg>Duplicate copies</span>` +
+    `<span><svg width="22" height="22"><path d="M11 20V8" stroke="#d00000" stroke-width="1.5"/><path d="M5 9a7 7 0 0 1 12 0" stroke="#d00000" stroke-width="1.5" fill="none"/></svg>AI provenance</span>` +
+    `<span><svg width="22" height="22"><circle cx="11" cy="11" r="5" stroke="#1a9a5a" stroke-width="1.5" fill="none"/><circle cx="11" cy="11" r="1.6" fill="#1a9a5a"/></svg>Has GPS</span>` +
+    `<span><svg width="22" height="22"><rect x="3" y="6" width="16" height="10" fill="#e6ecf1" stroke="#1e5082"/><circle cx="7" cy="11" r="2" fill="#d00000"/><circle cx="12" cy="11" r="2" fill="#1a9a5a"/></svg>Lights in a chip are your marked files inside it</span>` +
+    `</div>` +
+    (myLooks.length ? `<h2 class="sec">Your looks here<small>${myLooks.length}</small></h2><div class="legrid">` + myLooks.map(l => {
+      const lk = B.lookFor({ kind: l.kind, look: l.look });
+      return `<a onclick="openDetail(this)" data-p="${esc(l.path)}">${symImg(lk, 22)}<b style="color:${lk.color}">${esc(lk.label || l.name)}</b></a>`;
+    }).join("") + `</div>` : `<div class="note" style="margin-top:6px">Open any file and use its Look section to give it a color, a symbol, a nickname and an effect.</div>`);
+  const cv = document.getElementById("bcv");
+  curBoard = new B.Board(cv, d, {
+    onChip: k => { S.f.root = k.path; vizView(); window.scrollTo(0, 0); },
+    onCore: () => boardUp(),
+    onFile: f => { const a = document.createElement("a"); a.setAttribute("data-p", f.path); if (boardFull) boardFullToggle(); openDetail(a); },
+    rootName: root === home ? "Internal" : root.split("/").pop(),
+    tagColor: tagColorOf,
+    tagName: tags => { const id = String(tags || "").split(",").filter(Boolean)[0], t = id && tagMap[id]; return t ? { name: t.name, color: TAGHEX[t.color] || "#808080" } : null; },
+    onWindow: w => { document.getElementById("bwin").innerHTML = w ? `Showing ${esc(dstr(w[0]))} to ${esc(dstr(w[1] - 1))}. <a onclick="curBoard.win=null;this.parentNode.textContent='Showing all time.'">Show all time</a>` : "Showing all time."; },
+    onReplayEnd: () => { const b = document.getElementById("breplay"); if (b) b.textContent = "Replay history"; }
+  });
+}
+function boardUp() {
+  const home = call("home") || "/storage/emulated/0";
+  const root = S.f.root || home;
+  if (root === home) return;
+  S.f.root = root.slice(0, root.lastIndexOf("/")) || home;
+  if (S.f.root.length < home.length) S.f.root = home;
+  vizView();
+}
+function boardReplay() {
+  if (!curBoard) return;
+  const b = document.getElementById("breplay");
+  if (curBoard.replaying) { curBoard.stopReplay(); b.textContent = "Replay history"; return; }
+  curBoard.replay(14000); b.textContent = "Stop replay";
+}
+function boardFullToggle() {
+  const w = document.getElementById("bwrap"), cv = document.getElementById("bcv");
+  if (!w) return;
+  boardFull = !boardFull;
+  w.classList.toggle("bfull", boardFull);
+  document.getElementById("bclose").classList.toggle("hide", !boardFull);
+  cv.dataset.h = cv.dataset.h || cv.style.height;
+  cv.style.height = boardFull ? "100vh" : cv.dataset.h;
+}
+
 // ------------------------------------------------------------------ built-in viewers
-let media = { ctx: null, src: null, an: null, raf: 0, el: null, mode: "circuit" };
+let media = { ctx: null, src: null, an: null, raf: 0, el: null, mode: "bars" };
 function viewerHtml(d) {
   const p = encodeURIComponent(d.path);
   if (d.kind === "image") return `<div class="monitor"><div class="scr"><img src="/preview?p=${p}" onclick="fullView('${p}')" onerror="this.onerror=null;this.src='${thumbUrl(d.path)}'"></div></div><div class="note" style="text-align:center">Tap the picture for full screen.</div>`;
@@ -740,8 +932,8 @@ function viewerHtml(d) {
     const tag = d.kind === "video" ? `<video id="mel" controls playsinline preload="metadata" src="/file?p=${p}" style="width:100%;display:block;background:#000080;max-height:340px"></video>` : `<audio id="mel" controls preload="metadata" src="/file?p=${p}" style="width:100%"></audio>`;
     return (d.kind === "video" ? `<div class="monitor" style="max-width:520px">${tag}</div>` : "") +
       `<div class="monitor"><div class="scr" style="background:#fff"><canvas id="vcv" onclick="if(vfullOpen)vizFull()" style="position:absolute;inset:0;width:100%;height:100%"></canvas></div></div>` +
-      `<div class="row" style="justify-content:center">${[["circuit", "Circuit"], ["bars", "Spectrum"], ["scope", "Scope"], ["radial", "Radial"], ["wave", "Waterfall"]].map(m => `<a class="btn small ${media.mode === m[0] ? "down" : ""}" data-m="${m[0]}" onclick="vizMode('${m[0]}',this)">${m[1]}</a>`).join("")}</div>` +
-      `<div class="row" style="justify-content:center"><a class="btn small" onclick="vizFull()">Full screen</a><a class="btn small" id="vregen" onclick="if(window.CircuitFX)CircuitFX.regen()">New board</a></div>` +
+      `<div class="row" style="justify-content:center">${[["bars", "Spectrum"], ["scope", "Scope"], ["radial", "Radial"], ["wave", "Waterfall"]].map(m => `<a class="btn small ${media.mode === m[0] ? "down" : ""}" data-m="${m[0]}" onclick="vizMode('${m[0]}',this)">${m[1]}</a>`).join("")}</div>` +
+      `<div class="row" style="justify-content:center"><a class="btn small" onclick="vizFull()">Full screen</a></div>` +
       (d.kind === "audio" ? tag : `<div class="note" style="text-align:center">The visualizer follows the video's sound.</div>`);
   }
   if (d.kind === "text" || d.kind === "code") {
@@ -765,13 +957,11 @@ function wireViewer() {
       drawViz();
     } catch (e) { }
   });
-  el.addEventListener("pause", () => { if (media.mode === "circuit") circuitIdle(); });
   idleViz();
 }
 function vizMode(m, btn) {
   media.mode = m;
-  const rg = document.getElementById("vregen"); if (rg) rg.style.display = m === "circuit" ? "" : "none";
-  if (m === "circuit" && window.CircuitFX) CircuitFX.reset(); document.querySelectorAll("[data-m]").forEach(b => b.classList.toggle("down", b === btn)); media.fall = null; if (!media.el || media.el.paused) idleViz(); }
+  document.querySelectorAll("[data-m]").forEach(b => b.classList.toggle("down", b === btn)); media.fall = null; if (!media.el || media.el.paused) idleViz(); }
 function sizeCanvas() {
   const cv = document.getElementById("vcv"); if (!cv) return null;
   const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
@@ -780,41 +970,21 @@ function sizeCanvas() {
   return { cv, g, W, H };
 }
 function idleViz() {
-  if (media.mode === "circuit" && window.CircuitFX) { circuitIdle(); return; }
   const c = sizeCanvas(); if (!c) return;
   const { g, W, H } = c;
   g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
   g.strokeStyle = "#dfe8f7"; for (let x = 0; x < W; x += 16) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); } for (let y = 0; y < H; y += 16) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
   g.fillStyle = "#000080"; g.font = "bold 12px Tahoma"; g.textAlign = "center"; g.fillText("Press play to start the visualizer", W / 2, H / 2);
 }
-// Circuit runs its own demo rhythm until the track plays, like the original app.
-function circuitIdle() {
-  cancelAnimationFrame(media.raf);
-  const step = () => {
-    const cv = document.getElementById("vcv");
-    if (!cv || media.mode !== "circuit" || (media.el && !media.el.paused && media.an)) return;
-    CircuitFX.frame(cv, null, 44100);
-    media.raf = requestAnimationFrame(step);
-  };
-  step();
-}
 function vizFull() {
   const sc = document.getElementById("vcv").parentElement;
   const on = !sc.classList.contains("vfull");
   sc.classList.toggle("vfull", on);
   vfullOpen = on;
-  if (window.CircuitFX) CircuitFX.reset();
   if (!media.el || media.el.paused) idleViz();
 }
 let vfullOpen = false;
 function drawViz() {
-  if (media.mode === "circuit" && window.CircuitFX) {
-    const cv = document.getElementById("vcv");
-    if (!cv || !document.body.contains(cv)) return;
-    CircuitFX.frame(cv, media.an, media.ctx ? media.ctx.sampleRate : 44100);
-    media.raf = requestAnimationFrame(drawViz);
-    return;
-  }
   const c = sizeCanvas();
   if (!c || !media.an || !document.body.contains(c.cv)) return;
   const { g, W, H } = c, an = media.an, n = an.frequencyBinCount;
@@ -921,10 +1091,12 @@ function openDetail(el) {
     viewerHtml(d) +
     `<div class="row" style="justify-content:center"><a class="btn go" onclick="FCB.open(detailOpen)">Open file</a><a class="btn" onclick="closeDetail()">Back</a></div>` +
     `<h2 class="sec">Tags</h2><div id="dtags">${tagHtml}</div>` +
+    `<h2 class="sec">Look</h2>` + lookEditor({ path: d.path, kind: d.kind, look: d.look }) +
     `<h2 class="sec">Specifications</h2><table class="spec">${rows.join("")}</table>`;
   document.getElementById("tools").classList.add("hide");
   window.scrollTo(0, 0);
   wireViewer();
+  drawLookEditor();
 }
 function toggleTag(el, id) {
   const on = el.classList.contains("off");

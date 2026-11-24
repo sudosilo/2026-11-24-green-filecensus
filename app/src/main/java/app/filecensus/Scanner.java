@@ -277,6 +277,7 @@ public final class Scanner {
                     for (String gone : known.keySet()) {
                         db.delete("files", "path=?", new String[]{gone});
                         db.delete("file_tags", "path=?", new String[]{gone});
+                        db.delete("looks", "path=?", new String[]{gone});
                         removed++;
                     }
                     db.setTransactionSuccessful();

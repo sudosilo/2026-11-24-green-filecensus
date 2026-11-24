@@ -273,6 +273,11 @@ public class MainActivity extends Activity {
                 return new String(b, 0, n, java.nio.charset.StandardCharsets.UTF_8);
             } catch (Exception e) { return ""; }
         }
+        @JavascriptInterface public String board(String root) { try { return db().board(root); } catch (Exception e) { return err(e); } }
+        @JavascriptInterface public void setLook(String path, String look) { try { db().setLook(path, look); } catch (Exception ignored) { } }
+        @JavascriptInterface public void clearLook(String path) { db().clearLook(path); }
+        @JavascriptInterface public long lookMatching(String f, String look) { try { return db().lookMatching(f, look); } catch (Exception e) { return -1; } }
+        @JavascriptInterface public String looks() { try { return db().looks(); } catch (Exception e) { return "[]"; } }
         @JavascriptInterface public void open(String path) { runOnUiThread(() -> openFile(path)); }
         @JavascriptInterface public String version() {
             try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "?"; }
