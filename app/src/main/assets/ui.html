@@ -16,6 +16,11 @@ a:active { color: #ff0000; }
 #banner .logo { font-family: "Arial Black", Impact, Arial, sans-serif; font-size: 25px; letter-spacing: 1px; text-shadow: 2px 2px 0 #000040; margin: 0; line-height: 1.1; }
 #banner .logo span { color: #ffff66; }
 #banner .slogan { font-style: italic; font-size: 11px; margin-top: 2px; color: #dfefff; }
+#scanbtn { position: absolute; right: 10px; top: 12px; overflow: hidden; min-width: 96px; text-align: center; }
+#scanbtn span { position: relative; z-index: 1; }
+#scanbtn i { position: absolute; left: 0; bottom: 0; height: 3px; background: #000080; }
+#scanbtn i.busy { background: repeating-linear-gradient(90deg, #000080 0 8px, transparent 8px 14px); animation: busy 0.8s linear infinite; background-size: 28px 3px; }
+@keyframes busy { to { background-position: 28px 0; } }
 #banner .est { position: absolute; right: 10px; top: 10px; font-size: 9px; border: 1px solid #9cc8ff; padding: 1px 5px; color: #dfefff; }
 .marq { background: #ffffcc; color: #000080; font-family: "Courier New", monospace; font-size: 11px; padding: 2px 0; border-top: 1px solid #808080; border-bottom: 1px solid #808080; overflow: hidden; white-space: nowrap; }
 .marq span { display: inline-block; padding-left: 100%; animation: scroll 45s linear infinite; }
@@ -137,18 +142,17 @@ table.list tr.kept td { color: #808080; text-decoration: line-through; }
   <div id="banner">
     <div class="logo">File<span>Census</span></div>
     <div class="slogan">Every file on your phone, catalogued and dated.</div>
-    <div class="est" id="ver">v1.0</div>
+    <a class="btn" id="scanbtn" onclick="if(!this.classList.contains('down'))startScan()"><span>Run census</span></a>
   </div>
   <div class="marq"><span>WELCOME TO FILECENSUS ... tap any file for full metadata ... define a tag once and reuse it everywhere ... AI images are flagged from C2PA credentials, IPTC source type and PNG generation text ... screenshots are detected from Android and iOS naming and EXIF ... </span></div>
   <div id="tabs"></div>
   <div id="tools"></div>
   <div id="wrap">
-    <div id="scanbox"></div>
     <div id="main"></div>
   </div>
   <div id="foot">
     <div>Files in census: <span class="counter" id="cnt"></span></div>
-    <div style="margin-top:4px">FileCensus. Everything stays on this phone. Nothing is uploaded.</div>
+    <div style="margin-top:4px">FileCensus <span id="ver"></span>Everything stays on this phone. Nothing is uploaded.</div>
   </div>
 </div>
 <script src="board.js"></script>
@@ -294,26 +298,24 @@ window.fcResume = function () {
 function drawScan() {
   const acc = J("access") || { files: false };
   const st = J("status") || {};
-  const box = document.getElementById("scanbox");
-  if (!acc.files) {
-    box.innerHTML = `<div class="order"><b>FileCensus needs permission to read your files.</b><p style="margin:4px 0 6px">Android will open its "All files access" switch for this app. Turn it on, then come back here. Location access lets photo GPS come through unredacted.</p><a class="btn go" onclick="FCB.askAccess()">Grant file access</a></div>`;
-    return acc;
-  }
-  let html = `<div class="order">`;
+  const btn = document.getElementById("scanbtn");
+  if (!acc.files) { btn.classList.add("hide"); return acc; }
+  btn.classList.remove("hide");
   if (st.running) {
-    const pct = st.phase === "reading metadata" && st.toEnrich ? Math.round(100 * st.enriched / st.toEnrich) : 0;
-    html += `<b>Census in progress:</b> ${esc(st.phase)}. Walked <b class="now">${st.walked.toLocaleString()}</b> files, ${st.changed.toLocaleString()} new or changed` +
-      (st.toEnrich ? `, metadata ${st.enriched.toLocaleString()} of ${st.toEnrich.toLocaleString()}` : "") +
-      (st.phase === "finding duplicates" ? `, duplicate check ${st.dupDone.toLocaleString()} of ${st.dupSizes.toLocaleString()} size groups` : "") +
-      `<div class="meter"><i style="width:${st.phase === "walking folders" ? 15 : st.phase === "finding duplicates" ? (st.dupSizes ? 100 * st.dupDone / st.dupSizes : 0) : 15 + pct * 0.85}%"></i></div><div class="cur">${esc(st.current || "")}</div>`;
+    const pct = st.phase === "walking folders" ? 0
+      : st.phase === "reading metadata" ? (st.toEnrich ? Math.round(100 * st.enriched / st.toEnrich) : 0)
+      : st.phase === "finding duplicates" ? (st.dupSizes ? Math.round(100 * st.dupDone / st.dupSizes) : 0) : 0;
+    const word = st.phase === "walking folders" ? "Listing " + st.walked.toLocaleString()
+      : st.phase === "reading metadata" ? "Reading " + pct + "%"
+      : st.phase === "finding duplicates" ? "Duplicates " + pct + "%" : "Working";
+    btn.innerHTML = `<span>${esc(word)}</span><i style="width:${st.phase === "walking folders" ? 100 : pct}%" class="${st.phase === "walking folders" ? "busy" : ""}"></i>`;
+    btn.classList.add("down");
+    btn.title = st.current || "";
   } else {
-    const when = st.finished ? "Last census finished " + dtstr(st.finished) + (st.walked ? ", " + st.walked.toLocaleString() + " files walked, " + st.changed.toLocaleString() + " new or changed, " + st.removed.toLocaleString() + " removed." : ".") : "No census run yet this session.";
-    html += `<div class="row" style="margin:0"><a class="btn go" onclick="startScan()">Run census</a><span class="note">${esc(when)}</span></div>` +
-      (st.error ? `<div class="note" style="color:#d00000">Stopped: ${esc(st.error)}</div>` : "") +
-      (!acc.location ? `<div class="row"><a class="btn small" onclick="FCB.askAccess()">Allow photo locations</a><span class="note">Without it Android hides GPS in photos.</span></div>` : "");
+    btn.innerHTML = `<span>Run census</span>`;
+    btn.classList.remove("down");
+    btn.title = st.finished ? "Last census " + dtstr(st.finished) : "";
   }
-  html += `</div>`;
-  box.innerHTML = html;
   return acc;
 }
 function startScan() { call("scan"); drawScan(); poll(); }
@@ -536,7 +538,10 @@ function statsView() {
   if (!s.files) { main.innerHTML = `<h1 class="pg">Statistics</h1><p class="pending">Nothing counted yet. Run a census first.</p>`; return; }
   const acc = J("access") || {};
   let html = `<h1 class="pg">Statistics</h1><div class="crumb">${s.files.toLocaleString()} files, ${esc(size(s.bytes))}, from ${esc(dstr(s.first))} to ${esc(dstr(s.last))}.</div>`;
+  const st = J("status") || {};
   html += `<table class="spec"><tr><th>Storage scanned</th><td>${esc(acc.roots || "")}</td></tr>` +
+    `<tr><th>Last census</th><td>${st.finished ? esc(dtstr(st.finished) + (st.walked ? ", " + st.walked.toLocaleString() + " files walked, " + st.changed.toLocaleString() + " new or changed, " + st.removed.toLocaleString() + " removed" : "")) : "not run since the app opened"}${st.error ? `<div class="note" style="color:#d00000">Stopped: ${esc(st.error)}</div>` : ""}</td></tr>` +
+    `<tr><th>Photo locations</th><td>${acc.location ? "Allowed" : `Hidden by Android <a class="btn small" onclick="FCB.askAccess()">Allow</a>`}</td></tr>` +
     `<tr><th>AI-flagged files</th><td><a onclick="go('ai')">${(s.ai || 0).toLocaleString()}</a></td></tr>` +
     `<tr><th>Android screenshots</th><td><a onclick="go('shots')">${(s.android_shots || 0).toLocaleString()}</a></td></tr>` +
     `<tr><th>iOS screenshots</th><td><a onclick="go('shots')">${(s.ios_shots || 0).toLocaleString()}</a></td></tr>` +
@@ -1318,7 +1323,8 @@ function render(soft) {
   const acc = drawScan();
   drawCounter();
   if (!acc.files) {
-    document.getElementById("main").innerHTML = `<h1 class="pg">Welcome</h1><p>FileCensus walks every folder on this phone, records each file's date, type, size and a one-line hint about what is inside, then reads the deeper metadata: photo GPS, camera model, video length and resolution, screenshot details, and AI provenance from C2PA credentials and PNG generation text.</p>`;
+    document.getElementById("main").innerHTML = `<h1 class="pg">Welcome</h1><p>FileCensus walks every folder on this phone, records each file's date, type, size and a one-line hint about what is inside, then reads the deeper metadata: photo GPS, camera model, video length and resolution, screenshot details, and AI provenance from C2PA credentials and PNG generation text.</p>` +
+      `<div class="order"><b>FileCensus needs permission to read your files.</b><p style="margin:4px 0 6px">Android will open its "All files access" switch for this app. Turn it on, then come back here, and the first census starts on its own.</p><a class="btn go" onclick="FCB.askAccess()">Grant file access</a></div>`;
     return;
   }
   switch (S.view) {
@@ -1338,7 +1344,7 @@ function render(soft) {
 
 (function boot() {
   const v = call("version");
-  if (v) document.getElementById("ver").textContent = "v" + v;
+  if (v) document.getElementById("ver").textContent = "v" + v + ". ";
   refreshTags();
   render();
   const st = J("status") || {};
