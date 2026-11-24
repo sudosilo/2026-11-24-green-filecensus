@@ -57,6 +57,10 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                Map<String, String> h = req.getRequestHeaders();
+                String r = null;
+                if (h != null) for (Map.Entry<String, String> e : h.entrySet()) if ("range".equalsIgnoreCase(e.getKey())) r = e.getValue();
+                rangeHeader.set(r);
                 return serve(req.getUrl());
             }
 
@@ -89,6 +93,59 @@ public class MainActivity extends Activity {
         });
     }
 
+    private final ThreadLocal<String> rangeHeader = new ThreadLocal<>();
+
+    private String range(Uri u) {
+        String r = rangeHeader.get();
+        rangeHeader.remove();
+        return r;
+    }
+
+    /** Streams a file to the page with byte-range support so audio and video can seek. */
+    private WebResourceResponse serveFile(String path, String range, Map<String, String> headers) throws Exception {
+        if (path == null) return null;
+        File f = new File(path);
+        if (!f.isFile()) return new WebResourceResponse("text/plain", "utf-8", 404, "Missing", headers, new ByteArrayInputStream(new byte[0]));
+        String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(Kinds.ext(f.getName()));
+        if (mime == null) mime = "application/octet-stream";
+        long len = f.length();
+        long start = 0, end = len - 1;
+        boolean partial = false;
+        if (range != null && range.startsWith("bytes=")) {
+            String[] se = range.substring(6).split(",")[0].split("-", -1);
+            try {
+                if (!se[0].isEmpty()) start = Long.parseLong(se[0].trim());
+                if (se.length > 1 && !se[1].trim().isEmpty()) end = Math.min(len - 1, Long.parseLong(se[1].trim()));
+                else if (se[0].isEmpty() && se.length > 1) { start = Math.max(0, len - Long.parseLong(se[1].trim())); end = len - 1; }
+                partial = true;
+            } catch (NumberFormatException ignored) { }
+        }
+        if (start > end || start >= len) { start = 0; end = len - 1; partial = false; }
+        final long count = end - start + 1;
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
+        raf.seek(start);
+        InputStream in = new InputStream() {
+            long left = count;
+            @Override public int read() throws java.io.IOException {
+                if (left <= 0) return -1;
+                int b = raf.read();
+                if (b >= 0) left--;
+                return b;
+            }
+            @Override public int read(byte[] b, int off, int n) throws java.io.IOException {
+                if (left <= 0) return -1;
+                int r = raf.read(b, off, (int) Math.min(n, left));
+                if (r > 0) left -= r;
+                return r;
+            }
+            @Override public void close() throws java.io.IOException { raf.close(); }
+        };
+        headers.put("Accept-Ranges", "bytes");
+        headers.put("Content-Length", String.valueOf(count));
+        if (partial) headers.put("Content-Range", "bytes " + start + "-" + end + "/" + len);
+        return new WebResourceResponse(mime, null, partial ? 206 : 200, partial ? "Partial Content" : "OK", headers, in);
+    }
+
     private WebResourceResponse serve(Uri u) {
         String url = u.toString();
         if (!url.startsWith(ORIGIN)) return null;
@@ -103,6 +160,13 @@ public class MainActivity extends Activity {
                 if (b == null) return new WebResourceResponse("text/plain", "utf-8", 404, "None", headers, new ByteArrayInputStream(new byte[0]));
                 return new WebResourceResponse("image/jpeg", null, 200, "OK", headers, new ByteArrayInputStream(b));
             }
+            if (p.equals("/preview")) {
+                String file = u.getQueryParameter("p");
+                byte[] b = file == null ? null : Thumbs.preview(file);
+                if (b == null) return new WebResourceResponse("text/plain", "utf-8", 404, "None", headers, new ByteArrayInputStream(new byte[0]));
+                return new WebResourceResponse("image/jpeg", null, 200, "OK", headers, new ByteArrayInputStream(b));
+            }
+            if (p.equals("/file")) return serveFile(u.getQueryParameter("p"), range(u), headers);
             String asset = p.startsWith("/") ? p.substring(1) : p;
             if (asset.isEmpty()) asset = "ui.html";
             InputStream in = getAssets().open(asset);
@@ -194,6 +258,21 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void deleteTag(long id) { db().deleteTag(id); }
         @JavascriptInterface public void setTag(String path, long id, boolean on) { db().setTag(path, id, on); }
         @JavascriptInterface public long tagMatching(String f, long id, boolean on) { try { return db().tagMatching(f, id, on); } catch (Exception e) { return -1; } }
+        @JavascriptInterface public String dupes(int offset, int limit, String kind) { try { return db().dupes(offset, limit, kind); } catch (Exception e) { return err(e); } }
+        @JavascriptInterface public void dupeScan() { if (hasAccess()) Scanner.get(MainActivity.this).startDupes(); }
+        @JavascriptInterface public String tree(String root) { try { return db().tree(root); } catch (Exception e) { return err(e); } }
+        @JavascriptInterface public String sizeHist() { try { return db().sizeHist(); } catch (Exception e) { return "[]"; } }
+        @JavascriptInterface public String gps() { try { return db().gps(); } catch (Exception e) { return "[]"; } }
+        @JavascriptInterface public String home() { return Environment.getExternalStorageDirectory().getAbsolutePath(); }
+        @JavascriptInterface public String peek(String path) {
+            File f = new File(path);
+            byte[] b = new byte[(int) Math.min(65536, Math.max(0, f.length()))];
+            try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                int n = 0, r;
+                while (n < b.length && (r = in.read(b, n, b.length - n)) > 0) n += r;
+                return new String(b, 0, n, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (Exception e) { return ""; }
+        }
         @JavascriptInterface public void open(String path) { runOnUiThread(() -> openFile(path)); }
         @JavascriptInterface public String version() {
             try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "?"; }

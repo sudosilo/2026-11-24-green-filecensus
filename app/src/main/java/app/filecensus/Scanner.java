@@ -44,16 +44,23 @@ public final class Scanner {
     private volatile long walked, changed, enriched, toEnrich, removed;
     private volatile long started, finished;
     private volatile String error = "";
+    private volatile long dupSizes, dupDone, hashedBytes;
 
     private Scanner(Context c) { ctx = c; }
 
-    public synchronized void start() {
+    public synchronized void start() { begin(false); }
+
+    /** Re-runs only the duplicate finder. */
+    public synchronized void startDupes() { begin(true); }
+
+    private void begin(boolean dupesOnly) {
         if (running) return;
         running = true;
+        dupSizes = dupDone = hashedBytes = 0;
         walked = changed = enriched = toEnrich = removed = 0;
         error = "";
         started = System.currentTimeMillis();
-        Thread t = new Thread(this::run, "filecensus-scan");
+        Thread t = new Thread(dupesOnly ? this::runDupes : this::run, "filecensus-scan");
         t.setPriority(Thread.MIN_PRIORITY + 1);
         t.start();
     }
@@ -64,7 +71,8 @@ public final class Scanner {
                     .put("running", running).put("phase", phase).put("current", current)
                     .put("walked", walked).put("changed", changed).put("enriched", enriched)
                     .put("toEnrich", toEnrich).put("removed", removed)
-                    .put("started", started).put("finished", finished).put("error", error).toString();
+                    .put("started", started).put("finished", finished).put("error", error)
+                    .put("dupSizes", dupSizes).put("dupDone", dupDone).put("hashedBytes", hashedBytes).toString();
         } catch (JSONException e) {
             return "{}";
         }
@@ -88,6 +96,101 @@ public final class Scanner {
             }
         }
         return out;
+    }
+
+    private void runDupes() {
+        try {
+            findDupes(Db.get(ctx).getWritableDatabase());
+            phase = "done";
+        } catch (Throwable t) {
+            error = t.getClass().getSimpleName() + ": " + t.getMessage();
+            phase = "stopped";
+        } finally {
+            current = "";
+            finished = System.currentTimeMillis();
+            running = false;
+        }
+    }
+
+    private static final int EDGE = 65536;
+
+    /**
+     * Same size first, then a quick hash of the first and last 64 KB, then a full SHA-256 only for
+     * files that still collide. Only full-hash matches count as duplicates.
+     */
+    private void findDupes(SQLiteDatabase db) throws Exception {
+        phase = "finding duplicates";
+        List<Long> sizes = new ArrayList<>();
+        try (Cursor c = db.rawQuery("SELECT size FROM files WHERE size>0 GROUP BY size HAVING COUNT(*)>1 " +
+                "AND SUM(phash IS NULL) + SUM(hash IS NULL) > 0 ORDER BY size DESC", null)) {
+            while (c.moveToNext()) sizes.add(c.getLong(0));
+        }
+        dupSizes = sizes.size();
+        for (long size : sizes) {
+            List<String[]> rows = new ArrayList<>();
+            try (Cursor c = db.rawQuery("SELECT path, phash, hash FROM files WHERE size=?", new String[]{String.valueOf(size)})) {
+                while (c.moveToNext()) rows.add(new String[]{c.getString(0), c.getString(1), c.getString(2)});
+            }
+            Map<String, List<String[]>> byPartial = new HashMap<>();
+            db.beginTransaction();
+            try {
+                for (String[] r : rows) {
+                    if (r[1] == null) {
+                        current = r[0];
+                        String ph = hash(new File(r[0]), size, size <= 2L * EDGE);
+                        if (ph == null) continue;
+                        r[1] = ph;
+                        ContentValues v = new ContentValues();
+                        v.put("phash", ph);
+                        if (size <= 2L * EDGE) { v.put("hash", ph); r[2] = ph; }
+                        db.update("files", v, "path=?", new String[]{r[0]});
+                    }
+                    List<String[]> l = byPartial.get(r[1]);
+                    if (l == null) { l = new ArrayList<>(); byPartial.put(r[1], l); }
+                    l.add(r);
+                }
+                for (List<String[]> group : byPartial.values()) {
+                    if (group.size() < 2) continue;
+                    for (String[] r : group) {
+                        if (r[2] != null) continue;
+                        current = r[0];
+                        String full = hash(new File(r[0]), size, true);
+                        if (full == null) continue;
+                        ContentValues v = new ContentValues();
+                        v.put("hash", full);
+                        db.update("files", v, "path=?", new String[]{r[0]});
+                    }
+                }
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+            dupDone++;
+        }
+    }
+
+    private String hash(File f, long size, boolean full) {
+        try (java.io.RandomAccessFile r = new java.io.RandomAccessFile(f, "r")) {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] buf = new byte[EDGE];
+            if (full) {
+                int n;
+                while ((n = r.read(buf)) > 0) { md.update(buf, 0, n); hashedBytes += n; }
+            } else {
+                r.readFully(buf, 0, EDGE);
+                md.update(buf);
+                r.seek(size - EDGE);
+                r.readFully(buf, 0, EDGE);
+                md.update(buf);
+                hashedBytes += 2L * EDGE;
+            }
+            byte[] d = md.digest();
+            StringBuilder sb = new StringBuilder(full ? "f" : "p");
+            for (byte b : d) sb.append(String.format(java.util.Locale.US, "%02x", b & 0xff));
+            return sb.toString();
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void run() {
@@ -222,6 +325,7 @@ public final class Scanner {
             } finally {
                 db.endTransaction();
             }
+            findDupes(db);
             phase = "done";
         } catch (Throwable t) {
             error = t.getClass().getSimpleName() + ": " + t.getMessage();

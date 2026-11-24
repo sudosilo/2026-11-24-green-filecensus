@@ -63,6 +63,43 @@ public final class Thumbs {
         return b;
     }
 
+    /** A large JPEG for the in-app image viewer, so HEIC, RAW and huge photos all display. */
+    public static byte[] preview(String path) {
+        File f = new File(path);
+        if (!f.isFile()) return null;
+        try {
+            Bitmap bm = null;
+            if (Build.VERSION.SDK_INT >= 29) {
+                try { bm = ThumbnailUtils.createImageThumbnail(f, new Size(1600, 1600), null); } catch (Throwable ignored) { }
+            }
+            if (bm == null) {
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                BitmapFactory.decodeFile(path, o);
+                if (o.outWidth <= 0) return null;
+                int sample = 1;
+                while (o.outWidth / (sample * 2) >= 1600 || o.outHeight / (sample * 2) >= 1600) sample *= 2;
+                BitmapFactory.Options d = new BitmapFactory.Options();
+                d.inSampleSize = sample;
+                bm = BitmapFactory.decodeFile(path, d);
+                if (bm == null) return null;
+                int or = new ExifInterface(path).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1);
+                int rot = or == ExifInterface.ORIENTATION_ROTATE_90 ? 90 : or == ExifInterface.ORIENTATION_ROTATE_180 ? 180
+                        : or == ExifInterface.ORIENTATION_ROTATE_270 ? 270 : 0;
+                if (rot != 0) {
+                    Matrix m = new Matrix();
+                    m.postRotate(rot);
+                    bm = Bitmap.createBitmap(bm, 0, 0, bm.getWidth(), bm.getHeight(), m, true);
+                }
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            flatten(bm).compress(Bitmap.CompressFormat.JPEG, 88, out);
+            return out.toByteArray();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     private static Bitmap make(Context ctx, File f) throws Exception {
         String ext = Kinds.ext(f.getName());
         String kind = Kinds.kind(ext);

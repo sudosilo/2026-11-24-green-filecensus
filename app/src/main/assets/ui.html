@@ -136,7 +136,7 @@ table.list td.r, table.list th.r { text-align: right; white-space: nowrap; }
 const FCB = window.FC;
 const TABS = [
   ["catalog", "Catalog"], ["date", "By Date"], ["type", "By Type"], ["timeline", "Timeline"],
-  ["ai", "AI and Provenance"], ["shots", "Screenshots"], ["tags", "Tags"], ["stats", "Statistics"]
+  ["ai", "AI and Provenance"], ["shots", "Screenshots"], ["dupes", "Duplicates"], ["viz", "Visualize"], ["tags", "Tags"], ["stats", "Statistics"]
 ];
 const KINDS = { image: "Images", video: "Videos", audio: "Audio", document: "Documents", text: "Text", code: "Code and data files", archive: "Archives", apk: "Android apps", data: "Databases, fonts and other data", other: "Other files" };
 const COLORS = ["orange", "blue", "red", "green", "purple", "yellow", "navy", "teal", "pink", "gray"];
@@ -215,7 +215,7 @@ function drawTabs() {
 }
 function drawTools() {
   const el = document.getElementById("tools");
-  if (["tags", "stats", "timeline"].includes(S.view) && !S.f.from) { el.classList.add("hide"); return; }
+  if (["tags", "stats", "timeline", "dupes", "viz"].includes(S.view) && !S.f.from) { el.classList.add("hide"); return; }
   el.classList.remove("hide");
   const kindOpts = `<option value="">All types</option>` + Object.keys(KINDS).map(k => `<option value="${k}" ${S.f.kind === k ? "selected" : ""}>${KINDS[k]}</option>`).join("");
   const tagOpts = `<option value="0">Any tag</option><option value="-1" ${S.f.untagged ? "selected" : ""}>Untagged</option>` + tagList.map(t => `<option value="${t.id}" ${+S.f.tag === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
@@ -252,6 +252,7 @@ function go(view, extra) {
   render();
 }
 window.fcBack = function () {
+  if (fullOpen) { closeFull(); return true; }
   if (detailOpen) { closeDetail(); return true; }
   if (hist.length) { S = JSON.parse(hist.pop()); render(); return true; }
   return false;
@@ -277,7 +278,8 @@ function drawScan() {
     const pct = st.phase === "reading metadata" && st.toEnrich ? Math.round(100 * st.enriched / st.toEnrich) : 0;
     html += `<b>Census in progress:</b> ${esc(st.phase)}. Walked <b class="now">${st.walked.toLocaleString()}</b> files, ${st.changed.toLocaleString()} new or changed` +
       (st.toEnrich ? `, metadata ${st.enriched.toLocaleString()} of ${st.toEnrich.toLocaleString()}` : "") +
-      `<div class="meter"><i style="width:${st.phase === "walking folders" ? 15 : 15 + pct * 0.85}%"></i></div><div class="cur">${esc(st.current || "")}</div>`;
+      (st.phase === "finding duplicates" ? `, duplicate check ${st.dupDone.toLocaleString()} of ${st.dupSizes.toLocaleString()} size groups` : "") +
+      `<div class="meter"><i style="width:${st.phase === "walking folders" ? 15 : st.phase === "finding duplicates" ? (st.dupSizes ? 100 * st.dupDone / st.dupSizes : 0) : 15 + pct * 0.85}%"></i></div><div class="cur">${esc(st.current || "")}</div>`;
   } else {
     const when = st.finished ? "Last census finished " + dtstr(st.finished) + (st.walked ? ", " + st.walked.toLocaleString() + " files walked, " + st.changed.toLocaleString() + " new or changed, " + st.removed.toLocaleString() + " removed." : ".") : "No census run yet this session.";
     html += `<div class="row" style="margin:0"><a class="btn go" onclick="startScan()">Run census</a><span class="note">${esc(when)}</span></div>` +
@@ -298,7 +300,9 @@ function poll() {
     const now = Date.now();
     if (!st.running) {
       clearInterval(pollTimer);
-      if (!detailOpen) render();
+      if (!detailOpen && !fullOpen) render();
+    } else if (S.view === "dupes" && st.phase === "finding duplicates" && now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200) {
+      lastRefresh = now; dupesView();
     } else if (now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200 && document.getElementById("list")) {
       lastRefresh = now; render(true);
     }
@@ -516,6 +520,332 @@ function statsView() {
   main.innerHTML = html;
 }
 
+// ------------------------------------------------------------------ duplicates
+let dupePage = { offset: 0, done: false };
+function dupesView() {
+  const st = J("status") || {};
+  const main = document.getElementById("main");
+  const kinds = `<option value="">All types</option>` + Object.keys(KINDS).map(k => `<option value="${k}" ${S.f.kind === k ? "selected" : ""}>${KINDS[k]}</option>`).join("");
+  const r = J("dupes", 0, 1, S.f.kind || "") || {};
+  let html = `<h1 class="pg">Duplicates</h1><div class="crumb">Files are compared by size, then by a quick hash of their first and last 64 KB, then by a full SHA-256 of every byte. Only exact byte-for-byte copies are listed here.</div>`;
+  html += `<div class="order"><b>${(r.groups || 0).toLocaleString()}</b> sets of duplicates, <b>${(r.files || 0).toLocaleString()}</b> files, <b class="now">${esc(size(r.wasted || 0))}</b> taken up by the extra copies.` +
+    `<div class="row"><select id="dkind" onchange="S.f.kind=this.value;dupesView()">${kinds}</select><a class="btn ${st.running ? "" : "go"}" onclick="recheckDupes()">${st.running ? "Census running" : "Recheck duplicates"}</a></div>` +
+    (st.running && st.phase === "finding duplicates" ? `<div class="note">Checking ${st.dupDone.toLocaleString()} of ${st.dupSizes.toLocaleString()} size groups, ${esc(size(st.hashedBytes))} hashed.</div>` : "") +
+    `</div>`;
+  if (tagList.length) html += `<div class="row"><span class="note">Tag for the extra copies:</span><select id="dupetag">${tagList.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></div>`;
+  html += `<div id="dlist"></div><div class="more" id="dmore"></div>`;
+  main.innerHTML = html;
+  dupePage = { offset: 0, done: false };
+  moreDupes();
+}
+function recheckDupes() { call("dupeScan"); drawScan(); poll(); setTimeout(dupesView, 300); }
+function moreDupes() {
+  if (dupePage.done) return;
+  const r = J("dupes", dupePage.offset, 20, S.f.kind || "") || { items: [] };
+  const list = document.getElementById("dlist");
+  if (!list) return;
+  if (!dupePage.offset && !(r.items || []).length) list.innerHTML = `<p class="pending">No duplicates found yet. They are checked at the end of every census.</p>`;
+  let html = "";
+  for (const g of r.items || []) {
+    const gid = g.hash.slice(1, 13);
+    html += `<h2 class="sec">${g.count} copies of ${esc(size(g.size))}<small>${esc(size(g.size * (g.count - 1)))} extra</small></h2>`;
+    html += `<div class="note">SHA-256 ${esc(g.hash.slice(1, 17))}... | the oldest copy is listed first` +
+      (tagList.length ? ` | <a onclick="tagExtras('${gid}')">tag the extra copies</a> <span id="dm${gid}"></span>` : "") + `</div>`;
+    g.files.forEach((it, i) => {
+      html += itemHtml(it).replace('<div class="info">', `<div class="info" data-g="${gid}" data-extra="${i > 0 ? 1 : 0}">` + (i === 0 ? '<span class="badge gps">OLDEST</span>' : '<span class="badge">COPY</span>'));
+    });
+  }
+  list.insertAdjacentHTML("beforeend", html);
+  dupePage.offset += (r.items || []).length;
+  dupePage.done = dupePage.offset >= (r.groups || 0) || !(r.items || []).length;
+  document.getElementById("dmore").innerHTML = dupePage.done ? "" : `<a class="btn" onclick="moreDupes()">Show more sets (${((r.groups || 0) - dupePage.offset).toLocaleString()} left)</a>`;
+}
+function tagExtras(gid) {
+  const id = +document.getElementById("dupetag").value;
+  let n = 0;
+  document.querySelectorAll(`.info[data-g="${gid}"][data-extra="1"] a[data-p]`).forEach(a => { call("setTag", a.getAttribute("data-p"), id, true); n++; });
+  refreshTags();
+  document.getElementById("dm" + gid).textContent = n + " tagged " + (tagMap[id] ? tagMap[id].name : "") + ".";
+}
+
+// ------------------------------------------------------------------ visualizers
+const VIZ = [["storage", "Storage map"], ["types", "Types"], ["calendar", "Calendar"], ["sizes", "Sizes"], ["places", "Places"]];
+const KCOL = { image: "#1084d0", video: "#ff8000", audio: "#8000c0", document: "#d00000", text: "#808080", code: "#000080", archive: "#e0c000", apk: "#00a000", data: "#008080", other: "#c0c0c0" };
+function vizView() {
+  const sub = S.f.viz || "storage";
+  const main = document.getElementById("main");
+  main.innerHTML = `<h1 class="pg">Visualize</h1><div class="row">${VIZ.map(v => `<a class="btn small ${sub === v[0] ? "down" : ""}" onclick="S.f.viz='${v[0]}';vizView()">${v[1]}</a>`).join("")}</div><div id="viz"></div>`;
+  ({ storage: vizStorage, types: vizTypes, calendar: vizCalendar, sizes: vizSizes, places: vizPlaces })[sub]();
+}
+function vizStorage() {
+  const root = S.f.root || call("home") || "/storage/emulated/0";
+  const t = J("tree", root) || { items: [] };
+  const items = (t.items || []).filter(x => x.bytes > 0);
+  const total = items.reduce((a, b) => a + b.bytes, 0);
+  const W = 360, H = 420;
+  const parts = root.split("/").filter(Boolean);
+  let crumb = "";
+  for (let i = 0; i < parts.length; i++) {
+    const p = "/" + parts.slice(0, i + 1).join("/");
+    crumb += (i ? " / " : "") + (i >= 2 ? `<a onclick='S.f.root=${JSON.stringify(p).replace(/'/g, "&#39;")};vizView()'>${esc(parts[i])}</a>` : esc(parts[i]));
+  }
+  let html = `<div class="crumb">${crumb} | ${esc(size(total))}. Every box is a folder, sized by everything inside it. Tap a box to step into it.</div>`;
+  if (!items.length) { document.getElementById("viz").innerHTML = html + `<p class="pending">Nothing here yet.</p>`; return; }
+  const rects = squarify(items.map(x => ({ v: x.bytes, d: x })), 0, 0, W, H);
+  const pal = ["#1084d0", "#000080", "#ff8000", "#008080", "#8000c0", "#00a000", "#d00000", "#e0c000", "#ff40a0", "#808080"];
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;border:2px solid;border-color:#808080 #fff #fff #808080;background:#fff;display:block">`;
+  rects.forEach((r, i) => {
+    const d = r.d, name = d.dir ? d.path.split("/").pop() : "(files in this folder)";
+    const col = d.dir ? pal[i % pal.length] : "#c0c0c0";
+    const tap = d.dir ? `S.f.root=${JSON.stringify(d.path)};vizView()` : `go('catalog',{f:{folder:${JSON.stringify(d.path)}},crumb:'Folder'})`;
+    svg += `<g onclick='${tap.replace(/'/g, "&#39;")}'><rect x="${r.x + 1}" y="${r.y + 1}" width="${Math.max(0, r.w - 2)}" height="${Math.max(0, r.h - 2)}" fill="${col}" stroke="#fff" stroke-width="1"/>`;
+    if (r.w > 46 && r.h > 22) {
+      const fc = d.dir && !["#e0c000", "#ff8000"].includes(col) ? "#fff" : "#000";
+      svg += `<text x="${r.x + 5}" y="${r.y + 14}" font-size="10" font-family="Tahoma,Arial" font-weight="bold" fill="${fc}">${esc(name.slice(0, Math.floor(r.w / 6.5)))}</text>`;
+      if (r.h > 34) svg += `<text x="${r.x + 5}" y="${r.y + 27}" font-size="9" font-family="Tahoma,Arial" fill="${fc}">${esc(size(d.bytes))}</text>`;
+    }
+    svg += `</g>`;
+  });
+  svg += `</svg>`;
+  html += svg + `<table class="list" style="margin-top:8px"><tr><th>Folder</th><th class="r">Files</th><th class="r">Size</th></tr>` +
+    items.slice(0, 30).map(d => `<tr><td>${d.dir ? `<a onclick='S.f.root=${JSON.stringify(d.path).replace(/'/g, "&#39;")};vizView()'>${esc(d.path.split("/").pop())}</a>` : "(files in this folder)"}</td><td class="r">${d.count.toLocaleString()}</td><td class="r">${esc(size(d.bytes))}</td></tr>`).join("") + `</table>`;
+  document.getElementById("viz").innerHTML = html;
+}
+function squarify(items, x, y, w, h) {
+  const out = [];
+  const total = items.reduce((a, b) => a + b.v, 0);
+  if (!total) return out;
+  const scale = (w * h) / total;
+  const nodes = items.map(i => ({ a: i.v * scale, d: i.d })).filter(n => n.a > 0);
+  let row = [];
+  const worst = (r, side) => {
+    const s = r.reduce((a, b) => a + b.a, 0); let mx = 0, mn = Infinity;
+    r.forEach(n => { mx = Math.max(mx, n.a); mn = Math.min(mn, n.a); });
+    return Math.max(side * side * mx / (s * s), (s * s) / (side * side * mn));
+  };
+  const layout = r => {
+    const s = r.reduce((a, b) => a + b.a, 0);
+    if (w >= h) { const cw = s / h; let cy = y; r.forEach(n => { const nh = n.a / cw; out.push({ x, y: cy, w: cw, h: nh, d: n.d }); cy += nh; }); x += cw; w -= cw; }
+    else { const ch = s / w; let cx = x; r.forEach(n => { const nw = n.a / ch; out.push({ x: cx, y, w: nw, h: ch, d: n.d }); cx += nw; }); y += ch; h -= ch; }
+  };
+  for (const n of nodes) {
+    const side = Math.min(w, h);
+    if (!row.length || worst(row.concat([n]), side) <= worst(row, side)) row.push(n);
+    else { layout(row); row = [n]; }
+  }
+  if (row.length) layout(row);
+  return out;
+}
+function vizTypes() {
+  const by = S.f.by || "bytes";
+  const ks = (J("groups", "kind", "{}") || []).filter(k => k[by] > 0);
+  const total = ks.reduce((a, b) => a + b[by], 0) || 1;
+  let a0 = -Math.PI / 2, svg = `<svg viewBox="0 0 220 220" style="width:62%;max-width:260px;display:block;margin:8px auto">`;
+  ks.forEach(k => {
+    const a1 = a0 + 2 * Math.PI * k[by] / total;
+    const large = a1 - a0 > Math.PI ? 1 : 0;
+    const p = (a) => [110 + 100 * Math.cos(a), 110 + 100 * Math.sin(a)];
+    const [x0, y0] = p(a0), [x1, y1] = p(a1);
+    svg += ks.length === 1 ? `<circle cx="110" cy="110" r="100" fill="${KCOL[k.key] || "#c0c0c0"}" stroke="#000"/>`
+      : `<path d="M110 110L${x0.toFixed(1)} ${y0.toFixed(1)}A100 100 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}Z" fill="${KCOL[k.key] || "#c0c0c0"}" stroke="#fff" stroke-width="1.5" onclick="go('catalog',{f:{kind:'${k.key}'}})"/>`;
+    a0 = a1;
+  });
+  svg += `<circle cx="110" cy="110" r="100" fill="none" stroke="#000" stroke-width="2"/></svg>`;
+  document.getElementById("viz").innerHTML =
+    `<div class="row"><a class="btn small ${by === "bytes" ? "down" : ""}" onclick="S.f.by='bytes';vizView()">By space used</a><a class="btn small ${by === "count" ? "down" : ""}" onclick="S.f.by='count';vizView()">By number of files</a></div>` + svg +
+    `<table class="list"><tr><th>Type</th><th class="r">Share</th><th class="r">Files</th><th class="r">Size</th></tr>` +
+    ks.map(k => `<tr><td><b style="display:inline-block;width:10px;height:10px;border:1px solid #000;background:${KCOL[k.key] || "#c0c0c0"};margin-right:5px"></b><a onclick="go('catalog',{f:{kind:'${k.key}'}})">${esc(KINDS[k.key] || k.key)}</a></td><td class="r">${(100 * k[by] / total).toFixed(1)}%</td><td class="r">${k.count.toLocaleString()}</td><td class="r">${esc(size(k.bytes))}</td></tr>`).join("") + `</table>`;
+}
+function vizCalendar() {
+  const end = new Date(); end.setHours(0, 0, 0, 0);
+  const endT = end.getTime() + DAY;
+  const start = new Date(end.getTime() - 370 * DAY); start.setDate(start.getDate() - start.getDay());
+  const days = J("groups", "day", JSON.stringify({ from: start.getTime(), to: endT })) || [];
+  const map = {}; days.forEach(d => map[d.key] = d);
+  const max = Math.max(1, ...days.map(d => d.count));
+  const shade = n => !n ? "#f0f0f0" : n / max > .6 ? "#000080" : n / max > .3 ? "#1084d0" : n / max > .1 ? "#6ab0e8" : "#c8e0f7";
+  const cell = 11, gap = 2, weeks = Math.ceil((endT - start.getTime()) / (7 * DAY));
+  let svg = `<div id="calwrap" style="overflow-x:auto;border:2px solid;border-color:#808080 #fff #fff #808080;background:#fff;padding:6px"><svg width="${weeks * (cell + gap) + 24}" height="${7 * (cell + gap) + 18}">`;
+  let lastMonth = -1;
+  for (let w = 0; w < weeks; w++) {
+    for (let d = 0; d < 7; d++) {
+      const t = new Date(start.getTime() + (w * 7 + d) * DAY + 3600000); t.setHours(0, 0, 0, 0);
+      if (t.getTime() >= endT) continue;
+      const key = dstr(t.getTime()), g = map[key], n = g ? g.count : 0;
+      if (d === 0 && t.getMonth() !== lastMonth) { lastMonth = t.getMonth(); svg += `<text x="${24 + w * (cell + gap)}" y="9" font-size="9" font-family="Tahoma" fill="#404040">${t.toLocaleDateString(undefined, { month: "short" })}</text>`; }
+      svg += `<rect x="${24 + w * (cell + gap)}" y="${14 + d * (cell + gap)}" width="${cell}" height="${cell}" fill="${shade(n)}" stroke="#a0a0a0" stroke-width=".5" onclick="showRange(${t.getTime()},${t.getTime() + DAY},'${esc(dayTitle(t.getTime()))}')"><title>${key}: ${n}</title></rect>`;
+    }
+  }
+  ["S", "M", "T", "W", "T", "F", "S"].forEach((l, i) => { if (i % 2) svg += `<text x="4" y="${23 + i * (cell + gap)}" font-size="9" font-family="Tahoma" fill="#404040">${l}</text>`; });
+  svg += `</svg></div>`;
+  const busiest = days.slice().sort((a, b) => b.count - a.count).slice(0, 8);
+  document.getElementById("viz").innerHTML = `<div class="crumb">Files per day over the last year, by capture date or modification date. Tap any day to open it.</div>` + svg +
+    `<div class="legend" style="margin-top:6px"><span>fewer</span>${["#f0f0f0", "#c8e0f7", "#6ab0e8", "#1084d0", "#000080"].map(c => `<b style="background:${c}"></b>`).join("")}<span>more</span></div>` +
+    `<h2 class="sec">Busiest days</h2><table class="list"><tr><th>Day</th><th class="r">Files</th><th class="r">Size</th></tr>` +
+    busiest.map(d => { const p = d.key.split("-"); const t = new Date(+p[0], +p[1] - 1, +p[2]).getTime(); return `<tr><td><a onclick="showRange(${t},${t + DAY},'${esc(dayTitle(t))}')">${esc(dayTitle(t))}</a></td><td class="r">${d.count.toLocaleString()}</td><td class="r">${esc(size(d.bytes))}</td></tr>`; }).join("") + `</table>`;
+  const cw = document.getElementById("calwrap"); if (cw) cw.scrollLeft = cw.scrollWidth;
+}
+function vizSizes() {
+  const h = J("sizeHist") || [];
+  const max = Math.max(1, ...h.map(b => b.count)), maxB = Math.max(1, ...h.map(b => b.bytes));
+  let html = `<div class="crumb">How many files fall in each size range, and how much space each range takes.</div><h2 class="sec">Number of files</h2>`;
+  h.forEach(b => html += `<div class="bar"><span class="lbl" style="width:104px">${esc(b.label)}</span><span class="trk"><i class="to" style="width:${(100 * b.count / max).toFixed(1)}%"></i></span><span class="n">${b.count.toLocaleString()}</span></div>`);
+  html += `<h2 class="sec">Space used</h2>`;
+  h.forEach(b => html += `<div class="bar"><span class="lbl" style="width:104px">${esc(b.label)}</span><span class="trk"><i class="tv" style="width:${(100 * b.bytes / maxB).toFixed(1)}%"></i></span><span class="n">${esc(size(b.bytes))}</span></div>`);
+  document.getElementById("viz").innerHTML = html;
+}
+function vizPlaces() {
+  const pts = J("gps") || [];
+  const box = document.getElementById("viz");
+  if (!pts.length) { box.innerHTML = `<p class="pending">No files with GPS yet. If photos should have locations, tap "Allow photo locations" in the yellow box and run the census again.</p>`; return; }
+  let la0 = 90, la1 = -90, lo0 = 180, lo1 = -180;
+  pts.forEach(p => { la0 = Math.min(la0, p[1]); la1 = Math.max(la1, p[1]); lo0 = Math.min(lo0, p[2]); lo1 = Math.max(lo1, p[2]); });
+  const padLa = Math.max(.01, (la1 - la0) * .08), padLo = Math.max(.01, (lo1 - lo0) * .08);
+  la0 -= padLa; la1 += padLa; lo0 -= padLo; lo1 += padLo;
+  const kx = Math.cos((la0 + la1) / 2 * Math.PI / 180);
+  box.innerHTML = `<div class="crumb">${pts.length.toLocaleString()} located files plotted by latitude and longitude, newest first. Tap a dot to open the nearest file.</div><canvas id="pc" style="width:100%;border:2px solid;border-color:#808080 #fff #fff #808080;background:#fff;display:block"></canvas>` +
+    `<div class="legend" style="margin-top:6px">${Object.keys(KCOL).filter(k => pts.some(p => p[3] === k)).map(k => `<span><b style="background:${KCOL[k]}"></b>${esc(KINDS[k])}</span>`).join("")}</div><div class="note" id="pinfo"></div>`;
+  const cv = document.getElementById("pc"), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, spanX = (lo1 - lo0) * kx, spanY = la1 - la0;
+  const H = Math.min(520, Math.max(220, W * spanY / Math.max(spanX, 1e-6)));
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + "px";
+  const g = cv.getContext("2d"); g.scale(dpr, dpr);
+  const sx = W / Math.max(spanX, 1e-9), sy = H / Math.max(spanY, 1e-9), s = Math.min(sx, sy);
+  const ox = (W - spanX * s) / 2, oy = (H - spanY * s) / 2;
+  const X = lo => ox + (lo - lo0) * kx * s, Y = la => H - oy - (la - la0) * s;
+  g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
+  const step = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30].find(v => spanY / v <= 8) || 30;
+  g.strokeStyle = "#dfe8f7"; g.fillStyle = "#808080"; g.font = "9px Tahoma"; g.lineWidth = 1;
+  for (let v = Math.ceil(la0 / step) * step; v <= la1; v += step) { g.beginPath(); g.moveTo(0, Y(v)); g.lineTo(W, Y(v)); g.stroke(); g.fillText(v.toFixed(3), 2, Y(v) - 2); }
+  const stepLo = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60].find(v => (lo1 - lo0) / v <= Math.max(2, Math.floor(W / 90))) || 60;
+  for (let v = Math.ceil(lo0 / stepLo) * stepLo; v <= lo1; v += stepLo) { g.beginPath(); g.moveTo(X(v), 0); g.lineTo(X(v), H); g.stroke(); g.fillText(v.toFixed(3), X(v) + 2, H - 3); }
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; g.fillStyle = KCOL[p[3]] || "#000"; g.strokeStyle = "#000"; g.beginPath(); g.arc(X(p[2]), Y(p[1]), 3.2, 0, 7); g.fill(); g.stroke(); }
+  cv.onclick = e => {
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+    let best = null, bd = 1e9;
+    pts.forEach(p => { const d = (X(p[2]) - mx) ** 2 + (Y(p[1]) - my) ** 2; if (d < bd) { bd = d; best = p; } });
+    if (best && bd < 900) { const a = document.createElement("a"); a.setAttribute("data-p", best[0]); openDetail(a); }
+  };
+}
+
+// ------------------------------------------------------------------ built-in viewers
+let media = { ctx: null, src: null, an: null, raf: 0, el: null, mode: "bars" };
+function viewerHtml(d) {
+  const p = encodeURIComponent(d.path);
+  if (d.kind === "image") return `<div class="monitor"><div class="scr"><img src="/preview?p=${p}" onclick="fullView('${p}')" onerror="this.onerror=null;this.src='${thumbUrl(d.path)}'"></div></div><div class="note" style="text-align:center">Tap the picture for full screen.</div>`;
+  if (d.kind === "video" || d.kind === "audio") {
+    const tag = d.kind === "video" ? `<video id="mel" controls playsinline preload="metadata" src="/file?p=${p}" style="width:100%;display:block;background:#000080;max-height:340px"></video>` : `<audio id="mel" controls preload="metadata" src="/file?p=${p}" style="width:100%"></audio>`;
+    return (d.kind === "video" ? `<div class="monitor" style="max-width:520px">${tag}</div>` : "") +
+      `<div class="monitor"><div class="scr" style="background:#fff"><canvas id="vcv" style="position:absolute;inset:0;width:100%;height:100%"></canvas></div></div>` +
+      `<div class="row" style="justify-content:center">${[["bars", "Spectrum"], ["scope", "Scope"], ["radial", "Radial"], ["wave", "Waterfall"]].map(m => `<a class="btn small ${media.mode === m[0] ? "down" : ""}" data-m="${m[0]}" onclick="vizMode('${m[0]}',this)">${m[1]}</a>`).join("")}</div>` +
+      (d.kind === "audio" ? tag : `<div class="note" style="text-align:center">The visualizer follows the video's sound.</div>`);
+  }
+  if (d.kind === "text" || d.kind === "code") {
+    const txt = call("peek", d.path) || "";
+    return `<div class="box"><h3>Contents${d.size > 65536 ? " (first 64 KB)" : ""}</h3><pre style="margin:0;padding:6px 8px;max-height:360px;overflow:auto;font-family:'Courier New',monospace;font-size:11px;white-space:pre-wrap;word-break:break-word">${esc(txt)}</pre></div>`;
+  }
+  const it = { path: d.path, kind: d.kind, ext: d.ext };
+  return `<div class="monitor"><div class="scr">${isThumb(it) ? `<img src="${thumbUrl(d.path)}" data-k="${esc(d.kind)}" data-e="${esc(d.ext)}" onerror="swapIcon(this)">` : icon(d.kind, d.ext)}</div></div>`;
+}
+function wireViewer() {
+  const el = document.getElementById("mel");
+  if (!el) return;
+  media.el = el;
+  el.addEventListener("play", () => {
+    try {
+      if (!media.ctx) media.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (media.ctx.state === "suspended") media.ctx.resume();
+      if (!el._src) { el._src = media.ctx.createMediaElementSource(el); media.an = media.ctx.createAnalyser(); media.an.fftSize = 2048; media.an.smoothingTimeConstant = .78; el._src.connect(media.an); media.an.connect(media.ctx.destination); el._an = media.an; }
+      media.an = el._an;
+      cancelAnimationFrame(media.raf);
+      drawViz();
+    } catch (e) { }
+  });
+  idleViz();
+}
+function vizMode(m, btn) { media.mode = m; document.querySelectorAll("[data-m]").forEach(b => b.classList.toggle("down", b === btn)); media.fall = null; if (!media.el || media.el.paused) idleViz(); }
+function sizeCanvas() {
+  const cv = document.getElementById("vcv"); if (!cv) return null;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { cv, g, W, H };
+}
+function idleViz() {
+  const c = sizeCanvas(); if (!c) return;
+  const { g, W, H } = c;
+  g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
+  g.strokeStyle = "#dfe8f7"; for (let x = 0; x < W; x += 16) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); } for (let y = 0; y < H; y += 16) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
+  g.fillStyle = "#000080"; g.font = "bold 12px Tahoma"; g.textAlign = "center"; g.fillText("Press play to start the visualizer", W / 2, H / 2);
+}
+function drawViz() {
+  const c = sizeCanvas();
+  if (!c || !media.an || !document.body.contains(c.cv)) return;
+  const { g, W, H } = c, an = media.an, n = an.frequencyBinCount;
+  const freq = new Uint8Array(n), wave = new Uint8Array(an.fftSize);
+  an.getByteFrequencyData(freq); an.getByteTimeDomainData(wave);
+  if (media.mode === "wave" && media.lastMode !== "wave") { g.fillStyle = "#fff"; g.fillRect(0, 0, W, H); }
+  media.lastMode = media.mode;
+  if (media.mode !== "wave") { g.fillStyle = "#fff"; g.fillRect(0, 0, W, H); g.strokeStyle = "#eef2fa"; for (let y = 0; y < H; y += 16) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); } }
+  if (media.mode === "bars") {
+    const bars = 48, bw = W / bars;
+    media.peaks = media.peaks || new Array(bars).fill(0);
+    for (let i = 0; i < bars; i++) {
+      const lo = Math.floor(Math.pow(n * .9, i / bars)), hi = Math.max(lo + 1, Math.floor(Math.pow(n * .9, (i + 1) / bars)));
+      let v = 0; for (let j = lo; j < hi; j++) v = Math.max(v, freq[j]);
+      const h = (v / 255) * (H - 8);
+      const grd = g.createLinearGradient(0, H, 0, H - h); grd.addColorStop(0, "#000080"); grd.addColorStop(1, "#1084d0");
+      g.fillStyle = grd; g.fillRect(i * bw + 1, H - h, bw - 2, h);
+      media.peaks[i] = Math.max(h, media.peaks[i] - 1.5);
+      g.fillStyle = "#d00000"; g.fillRect(i * bw + 1, H - media.peaks[i] - 3, bw - 2, 2);
+    }
+  } else if (media.mode === "scope") {
+    g.lineWidth = 2; g.strokeStyle = "#000080"; g.beginPath();
+    for (let i = 0; i < wave.length; i++) { const x = i / wave.length * W, y = (wave[i] / 255) * H; i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.stroke();
+    g.strokeStyle = "#ff8000"; g.lineWidth = 1; g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+  } else if (media.mode === "radial") {
+    const cx = W / 2, cy = H / 2, r0 = Math.min(W, H) * .18, spokes = 96;
+    let avg = 0; for (let i = 0; i < 64; i++) avg += freq[i]; avg /= 64 * 255;
+    g.fillStyle = "#ffff66"; g.strokeStyle = "#000080"; g.lineWidth = 2; g.beginPath(); g.arc(cx, cy, r0 * (.7 + avg * .6), 0, 7); g.fill(); g.stroke();
+    for (let i = 0; i < spokes; i++) {
+      const v = freq[Math.floor(i / spokes * n * .6)] / 255, a = i / spokes * Math.PI * 2 - Math.PI / 2, len = r0 + v * Math.min(W, H) * .32;
+      g.strokeStyle = i % 2 ? "#1084d0" : "#000080"; g.lineWidth = 3;
+      g.beginPath(); g.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0); g.lineTo(cx + Math.cos(a) * len, cy + Math.sin(a) * len); g.stroke();
+    }
+  } else {
+    const rows = 1, img = g.getImageData(0, 0, c.cv.width, c.cv.height);
+    g.putImageData(img, 0, rows * (window.devicePixelRatio || 1));
+    for (let x = 0; x < W; x++) {
+      const v = freq[Math.floor(Math.pow(x / W, 2) * n * .9)] / 255;
+      const r = Math.round(255 - v * 255), gg = Math.round(255 - v * 200), b = Math.round(255 - v * 127);
+      g.fillStyle = `rgb(${r},${gg},${b})`; g.fillRect(x, 0, 1, rows);
+    }
+  }
+  media.raf = requestAnimationFrame(drawViz);
+}
+function stopMedia() {
+  cancelAnimationFrame(media.raf);
+  if (media.el) { try { media.el.pause(); media.el.removeAttribute("src"); media.el.load(); } catch (e) { } }
+  media.el = null; media.peaks = null;
+}
+let fullOpen = false;
+function fullView(p) {
+  fullOpen = true;
+  const o = document.createElement("div");
+  o.id = "full";
+  o.style.cssText = "position:fixed;inset:0;background:#c0c0c0;z-index:50;overflow:auto;display:flex;flex-direction:column";
+  o.innerHTML = `<div style="background:linear-gradient(90deg,#000080,#1084d0);color:#fff;font-weight:bold;font-size:12px;padding:4px 6px;display:flex;justify-content:space-between;align-items:center"><span>Picture viewer</span><span><a class="btn small" id="fz" onclick="zoomFull()">Actual size</a> <a class="btn small" onclick="closeFull()">Close</a></span></div><div style="flex:1;overflow:auto;background:#fff;border:2px solid;border-color:#808080 #fff #fff #808080;margin:4px"><img id="fimg" src="/preview?p=${p}" style="max-width:100%;max-height:100%;display:block;margin:auto"></div>`;
+  document.body.appendChild(o);
+}
+function zoomFull() {
+  const i = document.getElementById("fimg"), b = document.getElementById("fz");
+  const fit = i.style.maxWidth === "100%";
+  i.style.maxWidth = fit ? "none" : "100%"; i.style.maxHeight = fit ? "none" : "100%";
+  b.textContent = fit ? "Fit to screen" : "Actual size";
+}
+function closeFull() { fullOpen = false; const o = document.getElementById("full"); if (o) o.remove(); }
+
 // ------------------------------------------------------------------ detail
 let savedScroll = 0;
 function openDetail(el) {
@@ -551,12 +881,13 @@ function openDetail(el) {
     : `<span class="note">No tags yet. <a onclick="closeDetail();go('tags')">Define some</a>.</span>`;
   document.getElementById("main").innerHTML =
     `<h1 class="pg" style="word-break:break-all">${esc(d.name)}</h1><div class="crumb"><a onclick="closeDetail()">back to the list</a></div>` +
-    `<div class="monitor"><div class="scr">${isThumb(it) ? `<img src="${thumbUrl(d.path)}" data-k="${esc(d.kind)}" data-e="${esc(d.ext)}" onerror="swapIcon(this)">` : icon(d.kind, d.ext)}</div></div>` +
+    viewerHtml(d) +
     `<div class="row" style="justify-content:center"><a class="btn go" onclick="FCB.open(detailOpen)">Open file</a><a class="btn" onclick="closeDetail()">Back</a></div>` +
     `<h2 class="sec">Tags</h2><div id="dtags">${tagHtml}</div>` +
     `<h2 class="sec">Specifications</h2><table class="spec">${rows.join("")}</table>`;
   document.getElementById("tools").classList.add("hide");
   window.scrollTo(0, 0);
+  wireViewer();
 }
 function toggleTag(el, id) {
   const on = el.classList.contains("off");
@@ -566,6 +897,8 @@ function toggleTag(el, id) {
   refreshTags();
 }
 function closeDetail() {
+  stopMedia();
+  closeFull();
   detailOpen = null;
   render();
   setTimeout(() => window.scrollTo(0, savedScroll), 0);
@@ -592,6 +925,8 @@ function render(soft) {
     case "timeline": timelineView(); break;
     case "tags": tagsView(); break;
     case "stats": statsView(); break;
+    case "dupes": dupesView(); break;
+    case "viz": vizView(); break;
   }
 }
 
