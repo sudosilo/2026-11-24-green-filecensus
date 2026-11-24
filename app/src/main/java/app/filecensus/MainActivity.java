@@ -233,6 +233,35 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * Android's own dialog is the last gate before anything is moved or removed. The page cannot press it,
+     * and the work only runs from the dialog's own button.
+     */
+    void confirm(String token, boolean empty) {
+        String sum = Trash.summary(token);
+        if (sum == null || Trash.isEmptyPlan(token) != empty) {
+            web.evaluateJavascript("window.fcDeleteDone && fcDeleteDone(" + JSONObject.quote("{\"error\":\"This review expired. Nothing was changed.\"}") + ")", null);
+            return;
+        }
+        String title = empty ? "Delete permanently?" : "Move to the FileCensus trash?";
+        String msg = empty
+                ? sum + " will be erased from the phone. This cannot be undone."
+                : sum + " will be moved out of their folders into the FileCensus trash. You can restore them from the Trash tab until you empty it.";
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(msg)
+                .setCancelable(true)
+                .setNegativeButton("Cancel", (d, w) -> web.evaluateJavascript("window.fcDeleteDone && fcDeleteDone(" + JSONObject.quote("{\"cancelled\":true}") + ")", null))
+                .setPositiveButton(empty ? "Delete forever" : "Move to trash", (d, w) -> new Thread(() -> {
+                    String res;
+                    try { res = empty ? Trash.commitEmpty(MainActivity.this, token) : Trash.commitDelete(MainActivity.this, token); }
+                    catch (Exception e) { res = "{\"error\":" + JSONObject.quote(String.valueOf(e.getMessage())) + "}"; }
+                    final String r = res;
+                    runOnUiThread(() -> web.evaluateJavascript("window.fcDeleteDone && fcDeleteDone(" + JSONObject.quote(r) + ")", null));
+                }).start())
+                .show();
+    }
+
     /** Everything the page can ask the phone for. */
     final class Bridge {
         private Db db() { return Db.get(MainActivity.this); }
@@ -278,6 +307,14 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void clearLook(String path) { db().clearLook(path); }
         @JavascriptInterface public long lookMatching(String f, String look) { try { return db().lookMatching(f, look); } catch (Exception e) { return -1; } }
         @JavascriptInterface public String looks() { try { return db().looks(); } catch (Exception e) { return "[]"; } }
+        @JavascriptInterface public String queryPaths(String f, int limit) { try { return db().queryPaths(f, limit); } catch (Exception e) { return "[]"; } }
+        @JavascriptInterface public String prepareDelete(String paths) { try { return Trash.prepareDelete(MainActivity.this, paths); } catch (Exception e) { return err(e); } }
+        @JavascriptInterface public boolean narrowDelete(String token, String keep) { try { return Trash.narrow(token, keep); } catch (Exception e) { return false; } }
+        @JavascriptInterface public void confirmDelete(String token) { runOnUiThread(() -> confirm(token, false)); }
+        @JavascriptInterface public String trashList() { try { return Trash.list(MainActivity.this); } catch (Exception e) { return err(e); } }
+        @JavascriptInterface public String restore(String ids) { try { return Trash.restore(MainActivity.this, ids); } catch (Exception e) { return err(e); } }
+        @JavascriptInterface public String prepareEmpty(String ids) { try { return Trash.prepareEmpty(MainActivity.this, ids); } catch (Exception e) { return err(e); } }
+        @JavascriptInterface public void confirmEmpty(String token) { runOnUiThread(() -> confirm(token, true)); }
         @JavascriptInterface public void open(String path) { runOnUiThread(() -> openFile(path)); }
         @JavascriptInterface public String version() {
             try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "?"; }

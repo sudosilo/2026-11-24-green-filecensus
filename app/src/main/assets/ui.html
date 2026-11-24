@@ -107,6 +107,14 @@ table.list td.r, table.list th.r { text-align: right; white-space: nowrap; }
 .more { text-align: center; padding: 12px 0; }
 #foot { text-align: center; font-size: 10px; color: #404040; padding: 10px; border-top: 1px solid #808080; background: #f4f4f4; }
 .hide { display: none !important; }
+body.reviewing #selbar { display: none; }
+#selbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; background: #ffffcc; border-top: 3px double #000080; padding: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+body.selecting #page { padding-bottom: 70px; }
+body.selecting .frame { position: relative; }
+body.selecting .frame::after { content: ""; position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; background: #fff; border: 2px solid; border-color: #808080 #fff #fff #808080; z-index: 3; }
+body.selecting .picked .frame::after, body.selecting .frame.picked::after { content: "\2713"; color: #fff; background: #d00000; font: bold 15px/18px Tahoma; text-align: center; }
+body.selecting .prod.picked { background: #ffe8e8; }
+table.list tr.kept td { color: #808080; text-decoration: line-through; }
 .sym { vertical-align: middle; margin-right: 4px; }
 .nick { display: block; font-weight: bold; font-size: 12px; font-family: Tahoma, Verdana, sans-serif; }
 .gsym { position: absolute; bottom: 18px; left: 5px; z-index: 2; background: rgba(255,255,255,.85); border: 1px solid #808080; line-height: 0; padding: 1px; }
@@ -150,7 +158,7 @@ table.list td.r, table.list th.r { text-align: right; white-space: nowrap; }
 const FCB = window.FC;
 const TABS = [
   ["catalog", "Catalog"], ["date", "By Date"], ["type", "By Type"], ["timeline", "Timeline"],
-  ["ai", "AI and Provenance"], ["shots", "Screenshots"], ["dupes", "Duplicates"], ["viz", "Visualize"], ["tags", "Tags"], ["stats", "Statistics"]
+  ["ai", "AI and Provenance"], ["shots", "Screenshots"], ["dupes", "Duplicates"], ["viz", "Visualize"], ["tags", "Tags"], ["trash", "Trash"], ["stats", "Statistics"]
 ];
 const KINDS = { image: "Images", video: "Videos", audio: "Audio", document: "Documents", text: "Text", code: "Code and data files", archive: "Archives", apk: "Android apps", data: "Databases, fonts and other data", other: "Other files" };
 const COLORS = ["orange", "blue", "red", "green", "purple", "yellow", "navy", "teal", "pink", "gray"];
@@ -229,7 +237,7 @@ function drawTabs() {
 }
 function drawTools() {
   const el = document.getElementById("tools");
-  if (["tags", "stats", "timeline", "dupes", "viz"].includes(S.view) && !S.f.from) { el.classList.add("hide"); return; }
+  if (["tags", "stats", "timeline", "dupes", "viz", "trash"].includes(S.view) && !S.f.from) { el.classList.add("hide"); return; }
   el.classList.remove("hide");
   const kindOpts = `<option value="">All types</option>` + Object.keys(KINDS).map(k => `<option value="${k}" ${S.f.kind === k ? "selected" : ""}>${KINDS[k]}</option>`).join("");
   const tagOpts = `<option value="0">Any tag</option><option value="-1" ${S.f.untagged ? "selected" : ""}>Untagged</option>` + tagList.map(t => `<option value="${t.id}" ${+S.f.tag === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("");
@@ -242,7 +250,8 @@ function drawTools() {
     `<select id="tag" onchange="applyTools()">${tagOpts}</select>` +
     (S.view === "date" || S.view === "type" ? "" : `<select id="sort" onchange="applyTools()">${sortOpts}</select>`) +
     `<a class="btn ${S.mode === "list" ? "down" : ""}" onclick="setMode('list')">List</a>` +
-    `<a class="btn ${S.mode === "grid" ? "down" : ""}" onclick="setMode('grid')">Grid</a>`;
+    `<a class="btn ${S.mode === "grid" ? "down" : ""}" onclick="setMode('grid')">Grid</a>` +
+    `<a class="btn ${selecting() ? "down" : ""}" onclick="toggleSelect()">Select</a>`;
 }
 function applyTools() {
   const q = document.getElementById("q"), k = document.getElementById("kind"), t = document.getElementById("tag"), s = document.getElementById("sort");
@@ -266,6 +275,7 @@ function go(view, extra) {
   render();
 }
 window.fcBack = function () {
+  if (review) { closeReview(); return true; }
   if (boardFull) { boardFullToggle(); return true; }
   if (vfullOpen) { vizFull(); return true; }
   if (fullOpen) { closeFull(); return true; }
@@ -316,10 +326,11 @@ function poll() {
     const now = Date.now();
     if (!st.running) {
       clearInterval(pollTimer);
-      if (!detailOpen && !fullOpen && !boardFull) render();
+      if (!detailOpen && !fullOpen && !boardFull && !review && !document.getElementById("trashmsg")) render();
       return;
     }
     if (curBoard && S.view === "viz") curBoard.scan(st);
+    if (review) return;
     if (S.view === "dupes" && st.phase === "finding duplicates" && now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200) {
       lastRefresh = now; dupesView();
     } else if (now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200 && document.getElementById("list")) {
@@ -417,6 +428,7 @@ function loadMore() {
   }
   if (gridOpen) html += "</div>";
   list.insertAdjacentHTML("beforeend", html);
+  if (selecting()) markPicked();
   page.offset += (r.items || []).length;
   page.done = page.offset >= page.total || !(r.items || []).length;
   document.getElementById("more").innerHTML = page.done ? (page.total ? `<span class="note">End of list.</span>` : "") : `<a class="btn" onclick="loadMore()">Show more (${(page.total - page.offset).toLocaleString()} left)</a>`;
@@ -550,7 +562,8 @@ function dupesView() {
   const r = J("dupes", 0, 1, S.f.kind || "") || {};
   let html = `<h1 class="pg">Duplicates</h1><div class="crumb">Files are compared by size, then by a quick hash of their first and last 64 KB, then by a full SHA-256 of every byte. Only exact byte-for-byte copies are listed here.</div>`;
   html += `<div class="order"><b>${(r.groups || 0).toLocaleString()}</b> sets of duplicates, <b>${(r.files || 0).toLocaleString()}</b> files, <b class="now">${esc(size(r.wasted || 0))}</b> taken up by the extra copies.` +
-    `<div class="row"><select id="dkind" onchange="S.f.kind=this.value;dupesView()">${kinds}</select><a class="btn ${st.running ? "" : "go"}" onclick="recheckDupes()">${st.running ? "Census running" : "Recheck duplicates"}</a></div>` +
+    `<div class="row"><select id="dkind" onchange="S.f.kind=this.value;dupesView()">${kinds}</select><a class="btn ${st.running ? "" : "go"}" onclick="recheckDupes()">${st.running ? "Census running" : "Recheck duplicates"}</a>` +
+    (r.groups ? `<a class="btn" onclick="deleteAllExtras()">Review deleting every extra copy</a>` : "") + `</div>` +
     (st.running && st.phase === "finding duplicates" ? `<div class="note">Checking ${st.dupDone.toLocaleString()} of ${st.dupSizes.toLocaleString()} size groups, ${esc(size(st.hashedBytes))} hashed.</div>` : "") +
     `</div>`;
   if (tagList.length) html += `<div class="row"><span class="note">Tag for the extra copies:</span><select id="dupetag">${tagList.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></div>`;
@@ -571,7 +584,8 @@ function moreDupes() {
     const gid = g.hash.slice(1, 13);
     html += `<h2 class="sec">${g.count} copies of ${esc(size(g.size))}<small>${esc(size(g.size * (g.count - 1)))} extra</small></h2>`;
     html += `<div class="note">SHA-256 ${esc(g.hash.slice(1, 17))}... | the oldest copy is listed first` +
-      (tagList.length ? ` | <a onclick="tagExtras('${gid}')">tag the extra copies</a> <span id="dm${gid}"></span>` : "") + `</div>`;
+      (tagList.length ? ` | <a onclick="tagExtras('${gid}')">tag the extra copies</a> <span id="dm${gid}"></span>` : "") +
+      ` | <a onclick="deleteExtras('${gid}')">delete the extra copies</a></div>`;
     g.files.forEach((it, i) => {
       html += itemHtml(it).replace('<div class="info">', `<div class="info" data-g="${gid}" data-extra="${i > 0 ? 1 : 0}">` + (i === 0 ? '<span class="badge gps">OLDEST</span>' : '<span class="badge">COPY</span>'));
     });
@@ -580,6 +594,16 @@ function moreDupes() {
   dupePage.offset += (r.items || []).length;
   dupePage.done = dupePage.offset >= (r.groups || 0) || !(r.items || []).length;
   document.getElementById("dmore").innerHTML = dupePage.done ? "" : `<a class="btn" onclick="moreDupes()">Show more sets (${((r.groups || 0) - dupePage.offset).toLocaleString()} left)</a>`;
+}
+function deleteExtras(gid) {
+  const paths = [...document.querySelectorAll(`.info[data-g="${gid}"][data-extra="1"] a[data-p]`)].map(a => a.getAttribute("data-p"));
+  reviewDelete(paths, "Extra copies from one duplicate set. The oldest copy stays.");
+}
+function deleteAllExtras() {
+  const r = J("dupes", 0, 100000, S.f.kind || "") || { items: [] };
+  const paths = [];
+  (r.items || []).forEach(g => g.files.slice(1).forEach(f => paths.push(f.path)));
+  reviewDelete(paths, "Every extra copy from every duplicate set. The oldest copy of each set stays.");
 }
 function tagExtras(gid) {
   const id = +document.getElementById("dupetag").value;
@@ -1053,10 +1077,180 @@ function zoomFull() {
 }
 function closeFull() { fullOpen = false; const o = document.getElementById("full"); if (o) o.remove(); }
 
+// ------------------------------------------------------------------ safe delete
+// Nothing is deleted from the page. The page asks the phone for a review, shows every file in it,
+// lets you uncheck any of them, and then hands over to Android's own dialog for the final yes.
+let sel = new Set();
+let review = null;      // { token, items, refused, keep:Set, empty }
+function selecting() { return document.body.classList.contains("selecting"); }
+function toggleSelect() {
+  const on = !selecting();
+  document.body.classList.toggle("selecting", on);
+  if (!on) { sel.clear(); markPicked(); }
+  drawSelBar();
+  drawTools();
+}
+function markPicked() {
+  document.querySelectorAll("#list [data-p], #dlist [data-p]").forEach(el => {
+    const box = el.closest(".prod") || el;
+    box.classList.toggle("picked", sel.has(el.getAttribute("data-p")));
+  });
+}
+function pick(path) {
+  if (sel.has(path)) sel.delete(path); else sel.add(path);
+  markPicked();
+  drawSelBar();
+}
+function drawSelBar() {
+  let bar = document.getElementById("selbar");
+  if (!selecting()) { if (bar) bar.remove(); return; }
+  if (!bar) { bar = document.createElement("div"); bar.id = "selbar"; document.body.appendChild(bar); }
+  bar.innerHTML = `<b>${sel.size.toLocaleString()} selected</b>` +
+    (document.getElementById("list") ? `<a class="btn small" onclick="selectAllResults()">Select all results</a>` : "") +
+    `<a class="btn small" onclick="sel.clear();markPicked();drawSelBar()">Clear</a>` +
+    `<a class="btn small go" onclick="${sel.size ? "reviewDelete([...sel],'Selected files')" : ""}">Review delete</a>` +
+    `<a class="btn small" onclick="toggleSelect()">Done</a>`;
+}
+function selectAllResults() {
+  const f = filterFor(); delete f.limit; delete f.offset;
+  const paths = J("queryPaths", JSON.stringify(f), 20000) || [];
+  paths.forEach(p => sel.add(p));
+  markPicked(); drawSelBar();
+}
+
+function reviewDelete(paths, why) {
+  if (!paths || !paths.length) return;
+  const r = J("prepareDelete", JSON.stringify(paths));
+  if (!r || r.error) { alertBox("Could not prepare the review: " + ((r && r.error) || "unknown")); return; }
+  if (detailOpen) { stopMedia(); detailOpen = null; }
+  savedScroll = window.scrollY;
+  review = { token: r.token, items: r.items, refused: r.refused || [], keep: new Set(r.items.map(i => i.path)), why: why || "", empty: false };
+  drawReview();
+}
+function riskOf(it) {
+  const out = [];
+  const lk = it.look ? lookOf(it) : null;
+  if (lk) out.push(["HAS A LOOK", "warn"]);
+  if (it.tags) out.push(["TAGGED", "warn"]);
+  if (it.copies > 1) out.push([`${it.copies - 1} OTHER ${it.copies - 1 === 1 ? "COPY STAYS" : "COPIES STAY"}`, "safe"]);
+  else if ((it.kind === "image" || it.kind === "video") && /\/DCIM\//.test(it.path)) out.push(["ONLY COPY OF A CAMERA FILE", "warn"]);
+  if (Date.now() - (it.mtime || 0) < 7 * DAY) out.push(["CHANGED THIS WEEK", "warn"]);
+  if (it.ai) out.push(["AI", "info"]);
+  return out;
+}
+function drawReview() {
+  const rv = review, main = document.getElementById("main");
+  document.body.classList.add("reviewing");
+  document.getElementById("tools").classList.add("hide");
+  const kept = rv.items.filter(i => rv.keep.has(i.path));
+  const bytes = kept.reduce((a, b) => a + b.size, 0);
+  const warned = rv.items.filter(i => riskOf(i).some(x => x[1] === "warn"));
+  let h = `<h1 class="pg">Review before deleting</h1><div class="crumb">${esc(rv.why)}</div>` +
+    `<div class="order"><b class="now">${kept.length.toLocaleString()}</b> of ${rv.items.length.toLocaleString()} files checked, <b>${esc(size(bytes))}</b>.` +
+    `<p style="margin:4px 0 0">Checked files move to the FileCensus trash. Nothing is erased until you empty the trash, and you can restore anything before then. Uncheck any file you want to keep.</p></div>`;
+  if (warned.length) h += `<div class="box"><h3>Look twice</h3><div class="in"><p>${warned.length.toLocaleString()} of these files carry a warning: a look or tag you gave them, the only copy of a camera photo or video, or a change in the last week.</p>` +
+    `<a class="btn small" onclick="uncheckWarned()">Uncheck all of them</a></div></div>`;
+  if (rv.refused.length) h += `<div class="note" style="color:#800000">${rv.refused.length} left out: ` + rv.refused.slice(0, 5).map(x => esc(x.path.split("/").pop() + " (" + x.why + ")")).join(", ") + (rv.refused.length > 5 ? " and more" : "") + `.</div>`;
+  h += `<div class="row"><a class="btn small" onclick="review.keep=new Set(review.items.map(i=>i.path));drawReview()">Check all</a><a class="btn small" onclick="review.keep.clear();drawReview()">Uncheck all</a></div>`;
+  h += `<table class="list"><tr><th></th><th>File</th><th class="r">Size</th></tr>` + rv.items.slice(0, 3000).map((it, i) => {
+    const on = rv.keep.has(it.path), lk = it.look ? lookOf(it) : null;
+    const flags = riskOf(it).map(r => `<span class="badge ${r[1] === "warn" ? "ai" : r[1] === "safe" ? "gps" : "shot"}" style="animation:none">${esc(r[0])}</span>`).join("");
+    return `<tr class="${on ? "" : "kept"}"><td style="width:26px"><input type="checkbox" ${on ? "checked" : ""} onchange="reviewToggle(${i},this.checked)" style="width:20px;height:20px"></td>` +
+      `<td>${lk ? symImg(lk, 16) : ""}<b>${esc(it.name)}</b>${nickHtml(lk)}<div class="note">${esc((it.parent || "").replace(/^\/storage\/emulated\/0/, "Internal"))} | ${esc(dtstr(it.mtime))}</div>${flags}</td>` +
+      `<td class="r">${esc(size(it.size))}</td></tr>`;
+  }).join("") + `</table>` + (rv.items.length > 3000 ? `<div class="note">Showing the first 3,000 rows. All ${rv.items.length.toLocaleString()} are in the review.</div>` : "");
+  h += `<div class="row" style="margin-top:10px"><a class="btn go" onclick="${kept.length ? "commitReview()" : ""}">${kept.length ? `Move ${kept.length.toLocaleString()} files to trash` : "Nothing checked"}</a><a class="btn" onclick="closeReview()">Cancel</a></div>` +
+    `<div class="note">Android will ask you once more before anything moves.</div>`;
+  main.innerHTML = h;
+}
+function reviewToggle(i, on) { const p = review.items[i].path; if (on) review.keep.add(p); else review.keep.delete(p); drawReview(); }
+function uncheckWarned() { review.items.forEach(i => { if (riskOf(i).some(x => x[1] === "warn")) review.keep.delete(i.path); }); drawReview(); }
+function commitReview() {
+  const keep = [...review.keep];
+  if (!call("narrowDelete", review.token, JSON.stringify(keep))) { alertBox("This review expired. Nothing was deleted. Start the delete again."); return; }
+  call("confirmDelete", review.token);
+}
+function closeReview() { document.body.classList.remove("reviewing"); review = null; render(); setTimeout(() => window.scrollTo(0, savedScroll), 0); }
+window.fcDeleteDone = function (json) {
+  let r = {};
+  try { r = JSON.parse(json); } catch (e) { r = { error: "unreadable result" }; }
+  if (r.cancelled) return;
+  const main = document.getElementById("main");
+  let h;
+  if (r.error) h = `<h1 class="pg">Nothing changed</h1><p>${esc(r.error)}</p>`;
+  else if (r.moved !== undefined) h = `<h1 class="pg">Moved to the trash</h1><div class="order"><b class="now">${r.moved.toLocaleString()}</b> files, <b>${esc(size(r.bytes))}</b>, are in the FileCensus trash. Empty the trash to free that space, or restore anything you miss.</div>`;
+  else h = `<h1 class="pg">Trash emptied</h1><div class="order"><b class="now">${r.removed.toLocaleString()}</b> files erased, <b>${esc(size(r.bytes))}</b> freed.</div>`;
+  if (r.failed && r.failed.length) h += `<h2 class="sec">Left alone<small>${r.failed.length}</small></h2><table class="list">` + r.failed.slice(0, 200).map(f => `<tr><td>${esc(f.path)}</td><td>${esc(f.why)}</td></tr>`).join("") + `</table>`;
+  h += `<div class="row"><a class="btn go" onclick="review=null;go('trash')">Open the trash</a><a class="btn" onclick="review=null;render()">Back to the catalog</a></div>`;
+  review = null;
+  document.body.classList.remove("reviewing");
+  sel.clear();
+  document.body.classList.remove("selecting");
+  drawSelBar();
+  main.innerHTML = h;
+  window.scrollTo(0, 0);
+  drawCounter();
+};
+function alertBox(msg) {
+  const m = document.getElementById("main");
+  m.insertAdjacentHTML("afterbegin", `<div class="order" style="border-color:#d00000">${esc(msg)}</div>`);
+  window.scrollTo(0, 0);
+}
+
+// ------------------------------------------------------------------ the trash
+let trashSel = new Set();
+function trashView() {
+  const t = J("trashList") || { items: [], bytes: 0 };
+  const main = document.getElementById("main");
+  let h = `<h1 class="pg">Trash</h1><div class="crumb">Files you deleted wait here, out of their folders and hidden from the gallery, until you restore them or empty the trash. They still take up space until the trash is emptied.</div>` +
+    `<div class="order"><b class="now">${t.items.length.toLocaleString()}</b> files, <b>${esc(size(t.bytes))}</b> waiting.` +
+    (t.items.length ? `<div class="row"><a class="btn" onclick="restoreTrash(true)">Restore all</a><a class="btn" onclick="restoreTrash(false)">Restore checked</a>` +
+      `<a class="btn go" onclick="emptyTrash(false)">Empty checked</a><a class="btn go" onclick="emptyTrash(true)">Empty the whole trash</a></div>` : "") + `</div><div id="trashmsg"></div>`;
+  let batch = null;
+  for (const it of t.items) {
+    if (it.deleted !== batch) {
+      if (batch !== null) h += `</table>`;
+      batch = it.deleted;
+      h += `<h2 class="sec">Deleted ${esc(dtstr(batch))}</h2><table class="list">`;
+    }
+    const lk = it.look ? lookOf(it) : null;
+    h += `<tr><td style="width:26px"><input type="checkbox" ${trashSel.has(it.id) ? "checked" : ""} onchange="this.checked?trashSel.add(${it.id}):trashSel.delete(${it.id})" style="width:20px;height:20px"></td>` +
+      `<td>${lk ? symImg(lk, 16) : ""}<b>${esc(it.name)}</b>${nickHtml(lk)}<div class="note">was in ${esc(it.path.slice(0, it.path.lastIndexOf("/")).replace(/^\/storage\/emulated\/0/, "Internal"))}${it.there ? "" : " | missing from the trash folder"}</div></td><td class="r">${esc(size(it.size))}</td></tr>`;
+  }
+  if (batch !== null) h += `</table>`;
+  if (!t.items.length) h += `<p class="pending">The trash is empty.</p>`;
+  main.innerHTML = h;
+  trashView.items = t.items;
+}
+function restoreTrash(all) {
+  const ids = all ? trashView.items.map(i => i.id) : [...trashSel];
+  if (!ids.length) { document.getElementById("trashmsg").innerHTML = `<p class="note">Check the files to restore first.</p>`; return; }
+  const r = J("restore", JSON.stringify(ids)) || {};
+  trashSel.clear();
+  trashView();
+  document.getElementById("trashmsg").innerHTML = `<div class="order">${(r.restored || 0).toLocaleString()} files are back in their folders.` +
+    ((r.failed || []).length ? ` ${r.failed.length} could not be restored.` : "") + ` A quick census is putting them back in the catalog.</div>`;
+  drawScan(); poll();
+}
+function emptyTrash(all) {
+  const items = all ? trashView.items : trashView.items.filter(i => trashSel.has(i.id));
+  if (!items.length) { document.getElementById("trashmsg").innerHTML = `<p class="note">Check the files to erase first.</p>`; return; }
+  const r = J("prepareEmpty", JSON.stringify(items.map(i => i.id)));
+  if (!r || !r.token) return;
+  const main = document.getElementById("main");
+  main.innerHTML = `<h1 class="pg">Erase for good?</h1>` +
+    `<div class="order" style="border-color:#d00000"><b class="now" style="color:#d00000">${r.count.toLocaleString()}</b> files, <b>${esc(size(r.bytes))}</b>, will be erased from the phone. This is the one step that cannot be undone.</div>` +
+    `<table class="list"><tr><th>File</th><th class="r">Size</th></tr>` + items.slice(0, 3000).map(i => `<tr><td><b>${esc(i.name)}</b><div class="note">was in ${esc(i.path.slice(0, i.path.lastIndexOf("/")))}</div></td><td class="r">${esc(size(i.size))}</td></tr>`).join("") + `</table>` +
+    `<div class="row" style="margin-top:10px"><a class="btn go" style="background:#d00000;border-color:#ff8080 #600000 #600000 #ff8080" onclick="FCB.confirmEmpty('${r.token}')">Erase ${r.count.toLocaleString()} files</a><a class="btn" onclick="trashView()">Cancel</a></div>` +
+    `<div class="note">Android will ask you once more before anything is erased.</div>`;
+  window.scrollTo(0, 0);
+}
+
 // ------------------------------------------------------------------ detail
 let savedScroll = 0;
 function openDetail(el) {
   const path = el.getAttribute("data-p");
+  if (selecting() && el.closest && el.closest("#list, #dlist")) { pick(path); return; }
   const d = J("detail", path);
   if (!d || !d.path) return;
   savedScroll = window.scrollY;
@@ -1089,7 +1283,7 @@ function openDetail(el) {
   document.getElementById("main").innerHTML =
     `<h1 class="pg" style="word-break:break-all">${esc(d.name)}</h1><div class="crumb"><a onclick="closeDetail()">back to the list</a></div>` +
     viewerHtml(d) +
-    `<div class="row" style="justify-content:center"><a class="btn go" onclick="FCB.open(detailOpen)">Open file</a><a class="btn" onclick="closeDetail()">Back</a></div>` +
+    `<div class="row" style="justify-content:center"><a class="btn go" onclick="FCB.open(detailOpen)">Open file</a><a class="btn" onclick="reviewDelete([detailOpen],'This file')">Delete</a><a class="btn" onclick="closeDetail()">Back</a></div>` +
     `<h2 class="sec">Tags</h2><div id="dtags">${tagHtml}</div>` +
     `<h2 class="sec">Look</h2>` + lookEditor({ path: d.path, kind: d.kind, look: d.look }) +
     `<h2 class="sec">Specifications</h2><table class="spec">${rows.join("")}</table>`;
@@ -1115,6 +1309,8 @@ function closeDetail() {
 
 // ------------------------------------------------------------------ render
 function render(soft) {
+  if (!soft) { review = null; document.body.classList.remove("reviewing"); }
+  if (review) return;
   if (detailOpen && !soft) detailOpen = null;
   if (detailOpen) return;
   drawTabs();
@@ -1136,6 +1332,7 @@ function render(soft) {
     case "stats": statsView(); break;
     case "dupes": dupesView(); break;
     case "viz": vizView(); break;
+    case "trash": trashView(); break;
   }
 }
 

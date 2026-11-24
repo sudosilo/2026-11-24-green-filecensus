@@ -215,7 +215,7 @@ public final class Scanner {
                 while (!stack.isEmpty()) {
                     File dir = stack.pop();
                     String dp = dir.getAbsolutePath();
-                    if (dp.endsWith("/Android/data") || dp.endsWith("/Android/obb") || dp.contains("/.Trash")) continue;
+                    if (dp.endsWith("/Android/data") || dp.endsWith("/Android/obb") || dp.contains("/.Trash") || Trash.inTrash(dp)) continue;
                     File[] list = dir.listFiles();
                     if (list == null) continue;
                     current = dp;

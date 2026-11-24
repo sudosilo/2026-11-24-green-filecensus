@@ -27,7 +27,7 @@ public class Db extends SQLiteOpenHelper {
     }
 
     private Db(Context c) {
-        super(c, "filecensus.db", null, 3);
+        super(c, "filecensus.db", null, 4);
         setWriteAheadLoggingEnabled(true);
     }
 
@@ -48,6 +48,7 @@ public class Db extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE file_tags (path TEXT, tag_id INTEGER, PRIMARY KEY(path, tag_id))");
         db.execSQL("CREATE INDEX ix_ft_tag ON file_tags(tag_id)");
         createLooks(db);
+        Trash.createTable(db);
     }
 
     private static void createLooks(SQLiteDatabase db) {
@@ -64,6 +65,7 @@ public class Db extends SQLiteOpenHelper {
             db.execSQL("CREATE INDEX IF NOT EXISTS ix_size ON files(size)");
         }
         if (oldV < 3) createLooks(db);
+        if (oldV < 4) Trash.createTable(db);
     }
 
     static final String LOOK = "(SELECT IFNULL(color,'')||'|'||IFNULL(shape,'')||'|'||IFNULL(label,'')||'|'||IFNULL(size,1)||'|'||IFNULL(fx,'') FROM looks l WHERE l.path=files.path)";
@@ -150,6 +152,18 @@ public class Db extends SQLiteOpenHelper {
             }
         }
         out.put("items", items);
+        return out.toString();
+    }
+
+    public String queryPaths(String filterJson, int limit) throws JSONException {
+        JSONObject f = new JSONObject(filterJson);
+        List<String> args = new ArrayList<>();
+        String w = where(f, args);
+        JSONArray out = new JSONArray();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT path FROM files" + w + order(f.optString("sort")) +
+                " LIMIT " + Math.max(1, Math.min(20000, limit)), args.toArray(new String[0]))) {
+            while (c.moveToNext()) out.put(c.getString(0));
+        }
         return out.toString();
     }
 
