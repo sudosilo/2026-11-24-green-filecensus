@@ -22,9 +22,6 @@ a:active { color: #ff0000; }
 #scanbtn i.busy { background: repeating-linear-gradient(90deg, #000080 0 8px, transparent 8px 14px); animation: busy 0.8s linear infinite; background-size: 28px 3px; }
 @keyframes busy { to { background-position: 28px 0; } }
 #banner .est { position: absolute; right: 10px; top: 10px; font-size: 9px; border: 1px solid #9cc8ff; padding: 1px 5px; color: #dfefff; }
-.marq { background: #ffffcc; color: #000080; font-family: "Courier New", monospace; font-size: 11px; padding: 2px 0; border-top: 1px solid #808080; border-bottom: 1px solid #808080; overflow: hidden; white-space: nowrap; }
-.marq span { display: inline-block; padding-left: 100%; animation: scroll 45s linear infinite; }
-@keyframes scroll { to { transform: translateX(-100%); } }
 #tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 6px 0; background: #fff; border-bottom: 2px solid #000080; }
 #tabs a { display: block; padding: 4px 8px 3px; background: #e0e0e0; border: 1px solid #808080; border-bottom: none; color: #000080; text-decoration: none; font-size: 11px; font-weight: bold; border-radius: 4px 4px 0 0; }
 #tabs a.on { background: #000080; color: #fff; }
@@ -144,7 +141,6 @@ table.list tr.kept td { color: #808080; text-decoration: line-through; }
     <div class="slogan">Every file on your phone, catalogued and dated.</div>
     <a class="btn" id="scanbtn" onclick="if(!this.classList.contains('down'))startScan()"><span>Run census</span></a>
   </div>
-  <div class="marq"><span>WELCOME TO FILECENSUS ... tap any file for full metadata ... define a tag once and reuse it everywhere ... AI images are flagged from C2PA credentials, IPTC source type and PNG generation text ... screenshots are detected from Android and iOS naming and EXIF ... </span></div>
   <div id="tabs"></div>
   <div id="tools"></div>
   <div id="wrap">
