@@ -1,0 +1,1040 @@
+// GREEN PHONE EDIT
+// Circuit, ported from Circuit MusicFX (mohave.wtf multimedia line) and re-skinned for a light board.
+(function () {
+"use strict";
+var canvas = null, ctx = null;
+var off = document.createElement('canvas');
+var offctx = off.getContext('2d');
+var W = 0, H = 0, DPR = 1;
+
+var BANDS = [
+  { name:'BASS',     color:'#ff7a18', lo:20,   hi:120,   timeBase:1.4,  widthMul:1.8, tailMul:3.0, sustain:7,  burst:3, chipFlash:true,  gap:130 },
+  { name:'LOW-MID',  color:'#e09a00', lo:120,  hi:400,   timeBase:1.1,  widthMul:1.3, tailMul:2.6, sustain:11, burst:3, chipFlash:false, gap:110 },
+  { name:'MID',      color:'#00a868', lo:400,  hi:2000,  timeBase:0.95, widthMul:1.0, tailMul:2.3, sustain:14, burst:3, chipFlash:false, gap:100 },
+  { name:'HIGH-MID', color:'#0088cc', lo:2000, hi:6000,  timeBase:0.70, widthMul:0.8, tailMul:1.7, sustain:18, burst:4, chipFlash:false, gap:80  },
+  { name:'TREBLE',   color:'#8a3ad0', lo:6000, hi:20000, timeBase:0.42, widthMul:0.6, tailMul:1.1, sustain:24, burst:9, chipFlash:false, gap:65  }
+];
+
+// component library: each type lights in its own color when its zone gets hit
+var COMP = {
+  res:    { p:'R',  col:'#b07020' },   // resistor, tan
+  cap:    { p:'C',  col:'#1f6fd0' },   // capacitor, blue
+  diode:  { p:'D',  col:'#d03030' },   // diode, red
+  ind:    { p:'L',  col:'#d06a10' },   // inductor, copper
+  mosfet: { p:'Q',  col:'#1a9a5a' },   // mosfet, green
+  gate:   { p:'G',  col:'#0088cc' },   // logic gate, cyan
+  sw:     { p:'SW', col:'#c09000' },   // switch, yellow
+  driver: { p:'U',  col:'#7a3ad0' },   // driver chip, violet
+  gnd:    { p:'',   col:'#5a7a90' }     // ground
+};
+
+var traces = [];      // each: { px:[{x,y}], band, len, cum:[] }
+var vias = [];        // { x, y, r }
+var chips = [];       // { x, y, s }
+var components = [];  // PCB symbols: resistors, caps, diodes, inductors, grounds
+var coreChip = null;  // central processor everything radiates from
+var coreTraces = [];  // traces with an end near the core, oriented to fire outward
+var coreFlash = 0;    // the core pulses on the beat
+var antennas = [];    // RF antennas that broadcast on the highs
+var ledBank = null;   // an LED spectrum strip, a color visualizer on the board
+var ledLevels = [];   // smoothed level per LED
+
+// view modes: circuit board, ASCII bars, matrix rain
+var viewMode = 'circuit';
+var rainCols = [], rainCharW = 10, rainCharH = 16, rainRows = 0;
+var barPeaks = [];
+var twText = '', twTarget = '', twIndex = 0, twTimer = 0, twHold = 0, cmdIndex = 0;
+
+
+var bandTraces = [];  // arrays of trace indices per band
+var bandSeeds = [];   // region seed points, one per band
+var pulses = [];
+var gCell = 20;       // current grid cell size, set in buildCircuit
+
+var energies = [0,0,0,0,0];
+var spawnAcc = [0,0,0,0,0];
+var rawBand  = [0,0,0,0,0];   // un-smoothed level, used to spot hits
+var bandAvg  = [0,0,0,0,0];   // slow average each band sits at
+var bandFlash = [0,0,0,0,0];  // whole-circuit flash, spikes on a hit
+var nextHit  = [0,0,0,0,0];   // refractory clock so hits do not retrigger every frame
+var globalFlash = 0;          // brief board-wide lift on a strong bass hit
+
+// tempo tracking
+var bpmOnsets = [];           // timestamps of recent kicks
+var bpmRaw = 0;               // freshly computed tempo
+var bpm = 0;                  // smoothed tempo shown on screen
+var beatPeriod = 0;           // ms between beats
+var nextBeat = 0;             // scheduled time of the next beat
+var lastOnsetTime = 0;        // when the last kick landed
+var markerFlash = 0;          // the read point flashes on each beat
+var bpmActive = false;        // false when the track is silent
+var tempoLevel = 0;           // eased 0..1 so the tempo circuits fade gently
+var tempoCircuits = [];       // several circuits that each carry the beat
+
+var seed = (Math.random() * 1e9) | 0;
+function rng() {
+  seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+  var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+// ---------- audio ----------
+var analyser = null, freqData = null, binHz = 0;
+var mode = 'demo';
+
+function bandEnergy(b) {
+  var lo = Math.max(1, Math.floor(BANDS[b].lo / binHz));
+  var hi = Math.min(freqData.length - 1, Math.ceil(BANDS[b].hi / binHz));
+  var sum = 0, n = 0;
+  for (var i = lo; i <= hi; i++) { sum += freqData[i]; n++; }
+  var e = n ? (sum / n) / 255 : 0;
+  return Math.pow(e, 1.25);
+}
+
+function updateEnergies() {
+  if (mode === 'audio' && analyser) {
+    analyser.getByteFrequencyData(freqData);
+    for (var b = 0; b < 5; b++) rawBand[b] = bandEnergy(b);
+  } else {
+    var t = performance.now() / 1000;
+    rawBand[0] = Math.pow(Math.max(0, Math.sin(t * 3.0)), 6) * 0.95 + 0.04;       // kick
+    rawBand[1] = (Math.sin(t * 1.7 + 1) * 0.5 + 0.5) * 0.7;
+    rawBand[2] = (Math.sin(t * 2.3 + 2) * 0.5 + 0.5) * 0.75;
+    rawBand[3] = Math.pow(Math.max(0, Math.sin(t * 6.1 + 1)), 3) * 0.8 + 0.03;
+    rawBand[4] = Math.pow(Math.max(0, Math.sin(t * 11.0)), 5) * 0.85 + 0.02;      // hats
+  }
+
+  var now = performance.now();
+  var overall = 0;
+  for (var k = 0; k < 5; k++) {
+    var a = rawBand[k] > energies[k] ? 0.6 : 0.09;
+    energies[k] += (rawBand[k] - energies[k]) * a;          // smoothed level for sustained flow
+    bandAvg[k] += (rawBand[k] - bandAvg[k]) * 0.05;          // slow baseline to compare against
+    if (energies[k] > overall) overall = energies[k];
+
+    // a hit is a jump above where the band normally sits (more sensitive now)
+    if (rawBand[k] > bandAvg[k] * 1.22 + 0.03 && rawBand[k] > 0.07 && now >= nextHit[k]) {
+      var strength = Math.min(1, (rawBand[k] - bandAvg[k]) / 0.45);
+      triggerHit(k, strength);
+      nextHit[k] = now + BANDS[k].gap;
+      if (k === 0) pushBeat(now, strength);             // kicks drive the tempo
+    }
+    bandFlash[k] *= 0.90;                                // slower decay = flashier
+  }
+  globalFlash *= 0.84;
+  coreFlash *= 0.88;
+  for (var v = 0; v < vias.length; v++) if (vias[v].flash > 0.01) vias[v].flash *= 0.88;
+  for (var c = 0; c < chips.length; c++) if (chips[c].flash > 0.01) chips[c].flash *= 0.89;
+  for (var cm = 0; cm < components.length; cm++) if (components[cm].flash > 0.01) components[cm].flash *= 0.9;
+
+  // tempo is live only while there is sound and recent kicks
+  // tempo holds for a while after the last kick so breakdowns do not kill it
+  bpmActive = (bpmRaw > 0) && (now - lastOnsetTime < 6000) && (overall > 0.03);
+  if (bpmActive) {
+    bpm += (bpmRaw - bpm) * 0.1;
+    if (beatPeriod > 0) {
+      if (now - nextBeat > beatPeriod * 4) nextBeat = now + beatPeriod;  // resync after a gap
+      while (now >= nextBeat) { onBeat(); nextBeat += beatPeriod; }
+    }
+  } else {
+    nextBeat = 0;
+    markerFlash *= 0.85;
+  }
+  // ease overall brightness so the circuits fade gently rather than blinking off
+  var wantLevel = bpmActive ? 1 : 0;
+  tempoLevel += (wantLevel - tempoLevel) * (wantLevel > tempoLevel ? 0.06 : 0.02);
+}
+
+function pushBeat(now, strength) {
+  lastOnsetTime = now;
+  bpmOnsets.push(now);
+  if (bpmOnsets.length > 24) bpmOnsets.shift();
+  while (bpmOnsets.length && now - bpmOnsets[0] > 4000) bpmOnsets.shift();
+  if (bpmOnsets.length >= 4) {
+    var iv = [];
+    for (var i = 1; i < bpmOnsets.length; i++) {
+      var d = bpmOnsets[i] - bpmOnsets[i - 1];
+      if (d > 180 && d < 2000) iv.push(d);            // 30 to 333 bpm before folding
+    }
+    if (iv.length >= 3) {
+      iv.sort(function(p, q){ return p - q; });
+      var med = iv[(iv.length / 2) | 0];
+      var b = 60000 / med;
+      while (b < 70) b *= 2;                           // fold octaves into a musical range
+      while (b > 180) b /= 2;
+      bpmRaw = b;
+      beatPeriod = 60000 / bpmRaw;
+      if (nextBeat === 0) nextBeat = now + beatPeriod;
+    }
+  }
+}
+
+function onBeat() {
+  markerFlash = 1;
+  // snap each bead train so a bead sits on its read point right now
+  for (var i = 0; i < tempoCircuits.length; i++) {
+    var tr = traces[tempoCircuits[i].idx];
+    tempoCircuits[i].beadOffset = tr.len * 0.5;
+  }
+  emitCore();
+}
+
+// the core fires a burst of pulses outward along its traces
+function emitCore() {
+  if (viewMode !== 'circuit' || !coreTraces.length) return;
+  coreFlash = Math.min(1.5, coreFlash + 0.9);
+  var count = Math.min(coreTraces.length, 10);
+  for (var i = 0; i < count && pulses.length < 360; i++) {
+    var ct = coreTraces[(rng() * coreTraces.length) | 0];
+    var tr = traces[ct.idx];
+    pulses.push({ tr: tr, pos: 0, speed: tr.len / 0.6, band: tr.band, intensity: 1, rev: ct.rev });
+  }
+}
+
+function spawnOne(b, intensity) {
+  var list = bandTraces[b];
+  if (!list.length) return;
+  var tr = traces[list[(rng() * list.length) | 0]];
+  var time = BANDS[b].timeBase * (1 - intensity * 0.55);
+  pulses.push({
+    tr: tr,
+    pos: 0,
+    speed: tr.len / Math.max(0.28, time),
+    band: b,
+    intensity: 0.4 + intensity * 0.6
+  });
+}
+
+function triggerHit(b, strength) {
+  var st = BANDS[b];
+  bandFlash[b] = Math.min(1.8, bandFlash[b] + 0.95 + strength * 0.6);
+  if (b === 0) globalFlash = Math.min(1, globalFlash + strength * 0.6);
+
+  var n = Math.round(st.burst * (0.6 + strength));
+  if (viewMode === 'circuit') {
+    for (var i = 0; i < n && pulses.length < 360; i++) spawnOne(b, 0.6 + strength * 0.4);
+  }
+
+  // flash this band's nodes
+  var want = 8 + ((strength * 10) | 0), flashed = 0, guard = 0;
+  while (flashed < want && guard < vias.length * 2) {
+    guard++;
+    var vi = (rng() * vias.length) | 0;
+    if (vias[vi].band === b) { vias[vi].flash = 1; flashed++; }
+  }
+  // every band lights its chip pads, bass hardest
+  var chipBase = st.chipFlash ? 0.85 : 0.5;
+  for (var c = 0; c < chips.length; c++) {
+    if (chips[c].band === b) chips[c].flash = Math.min(1, chipBase + strength * 0.4);
+  }
+  // light components sitting in this band's zone, in their own type color
+  for (var cm = 0; cm < components.length; cm++) {
+    if (components[cm].band === b) components[cm].flash = Math.min(1, 0.6 + strength * 0.4);
+  }
+}
+
+// ---------- circuit generation ----------
+function bandOf(px, py) {
+  var best = 0, bd = 1e18;
+  for (var q = 0; q < bandSeeds.length; q++) {
+    var dx = px - bandSeeds[q].x, dy = py - bandSeeds[q].y, d = dx*dx + dy*dy;
+    if (d < bd) { bd = d; best = q; }
+  }
+  return best;
+}
+
+function makeTrace(pts, band, cell) {
+  var px = pts.map(function(p){ return { x:p.x * cell, y:p.y * cell }; });
+  return makePxTrace(px, band);
+}
+
+// build a trace straight from pixel points (used for core leads)
+function makePxTrace(px, band) {
+  var len = 0, cum = [0];
+  for (var i = 1; i < px.length; i++) {
+    len += Math.hypot(px[i].x - px[i-1].x, px[i].y - px[i-1].y);
+    cum.push(len);
+  }
+  return { px:px, band:band, len:len, cum:cum };
+}
+
+// route a lead out from a core pin: a short stub, then 45 degree steps fanning outward
+function routeLead(bx, by, dir, cell) {
+  var pts = [{ x:bx, y:by }];
+  var ang = Math.atan2(dir[1], dir[0]);
+  var outAng = ang;
+  var x = bx + Math.cos(ang) * cell * 0.7;
+  var y = by + Math.sin(ang) * cell * 0.7;
+  pts.push({ x:x, y:y });                       // the pin stub
+  var steps = 4 + ((rng() * 5) | 0);
+  for (var k = 0; k < steps; k++) {
+    var r = rng();
+    if (r < 0.28) ang += Math.PI / 4;
+    else if (r < 0.56) ang -= Math.PI / 4;
+    if (Math.cos(ang - outAng) < 0.2) ang = outAng + (rng() < 0.5 ? 1 : -1) * Math.PI / 4;
+    var seg = cell * (0.9 + rng() * 0.8);
+    var nx = x + Math.cos(ang) * seg, ny = y + Math.sin(ang) * seg;
+    if (nx < cell || nx > W - cell || ny < cell || ny > H - cell) break;
+    x = nx; y = ny; pts.push({ x:x, y:y });
+  }
+  return pts;
+}
+
+function buildCircuit() {
+  var cell = Math.max(15, Math.round(Math.min(W, H) / 34));
+  gCell = cell;
+  var cols = Math.floor(W / cell);
+  var rows = Math.floor(H / cell);
+  var occ = new Uint8Array(cols * rows);
+  function idx(x, y){ return x + y * cols; }
+  var dirs = [[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1],[0,-1],[1,-1]];
+
+  traces = []; vias = []; chips = [];
+  bandTraces = [[],[],[],[],[]];
+
+  // five region seeds, one per band, so each frequency owns a contiguous zone
+  bandSeeds = [];
+  for (var sg = 0; sg < 5; sg++) bandSeeds.push({ x: rng() * W, y: rng() * H });
+
+  var target = Math.floor(cols * rows / 13);
+  var attempts = 0;
+  while (traces.length < target && attempts < target * 7) {
+    attempts++;
+    var x = (rng() * cols) | 0, y = (rng() * rows) | 0;
+    if (occ[idx(x, y)]) continue;
+    var dir = (rng() * 8) | 0;
+    var pts = [{ x:x, y:y }];
+    occ[idx(x, y)] = 1;
+    var maxLen = 8 + ((rng() * 32) | 0);
+    for (var s = 0; s < maxLen; s++) {
+      var r = rng();
+      if (r < 0.17) dir = (dir + 1) & 7;
+      else if (r < 0.34) dir = (dir + 7) & 7;
+      var nx = x + dirs[dir][0], ny = y + dirs[dir][1];
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) break;
+      if (occ[idx(nx, ny)]) break;
+      x = nx; y = ny; occ[idx(x, y)] = 1; pts.push({ x:x, y:y });
+    }
+    if (pts.length < 3) continue;
+    var mid = pts[(pts.length / 2) | 0];
+    var band = bandOf(mid.x * cell, mid.y * cell);
+    var ti = traces.length;
+    traces.push(makeTrace(pts, band, cell));
+    bandTraces[band].push(ti);
+  }
+
+  for (var i = 0; i < traces.length; i++) {
+    var tr = traces[i];
+    if (rng() < 0.7) vias.push({ x:tr.px[0].x, y:tr.px[0].y, r:cell * 0.16, band:tr.band, flash:0 });
+    if (rng() < 0.5) {
+      var p = tr.px[tr.px.length - 1];
+      vias.push({ x:p.x, y:p.y, r:cell * 0.13, band:tr.band, flash:0 });
+    }
+  }
+
+  var chipCount = 6 + ((rng() * 8) | 0);
+  for (var c = 0; c < chipCount; c++) {
+    var chx = (1 + rng() * (cols - 2)) * cell;
+    var chy = (1 + rng() * (rows - 2)) * cell;
+    chips.push({ x:chx, y:chy, s:cell * (0.8 + rng() * 0.7), band:bandOf(chx, chy), flash:0 });
+  }
+
+  // the longest few traces carry the beat; they cross-fade so the effect persists
+  var idxs = [];
+  for (var ti2 = 0; ti2 < traces.length; ti2++) idxs.push(ti2);
+  idxs.sort(function(a, b){ return traces[b].len - traces[a].len; });
+  tempoCircuits = [];
+  for (var tc = 0; tc < Math.min(5, idxs.length); tc++) {
+    tempoCircuits.push({ idx: idxs[tc], beadOffset: rng() * 500, phase: rng() * 6.283 });
+  }
+
+  buildComponents(cell);
+  buildFeatures(cell);
+
+  // central processor at screen center, with a routed lead growing from each pin
+  coreChip = { x: W / 2, y: H / 2, s: cell * 2.6, pads: [] };
+  coreTraces = [];
+  var hs = coreChip.s / 2, perSide = 5;
+  var sideDefs = [ ['top', [0,-1]], ['bottom', [0,1]], ['left', [-1,0]], ['right', [1,0]] ];
+  for (var sd = 0; sd < sideDefs.length; sd++) {
+    var edge = sideDefs[sd][0], ed = sideDefs[sd][1];
+    for (var pin = 0; pin < perSide; pin++) {
+      var tt = (pin + 1) / (perSide + 1), bx, by;
+      if (edge === 'top')         { bx = coreChip.x - hs + coreChip.s * tt; by = coreChip.y - hs; }
+      else if (edge === 'bottom') { bx = coreChip.x - hs + coreChip.s * tt; by = coreChip.y + hs; }
+      else if (edge === 'left')   { bx = coreChip.x - hs; by = coreChip.y - hs + coreChip.s * tt; }
+      else                        { bx = coreChip.x + hs; by = coreChip.y - hs + coreChip.s * tt; }
+      coreChip.pads.push({ x:bx, y:by });
+      var lead = routeLead(bx, by, ed, cell);
+      if (lead.length < 2) continue;
+      var endp = lead[lead.length - 1];
+      var lband = bandOf(endp.x, endp.y);
+      var li = traces.length;
+      traces.push(makePxTrace(lead, lband));
+      bandTraces[lband].push(li);
+      coreTraces.push({ idx: li, rev: false });
+      vias.push({ x: endp.x, y: endp.y, r: cell * 0.14, band: lband, flash: 0 });
+    }
+  }
+
+  renderStaticBoard(cell);
+}
+
+function buildComponents(cell) {
+  components = [];
+  var counts = {};
+  // weighted pool so common parts appear more often
+  var pool = ['res','res','res','cap','cap','diode','ind','mosfet','gate','sw','driver'];
+
+  // parts sit inline on a straight stretch of a trace
+  var want = Math.min(150, Math.floor(traces.length * 0.6));
+  var tries = 0;
+  while (components.length < want && tries < want * 6) {
+    tries++;
+    var tr = traces[(rng() * traces.length) | 0];
+    if (tr.px.length < 3) continue;
+    var i = 1 + ((rng() * (tr.px.length - 1)) | 0);
+    var a = tr.px[i - 1], b = tr.px[i];
+    var dx = b.x - a.x, dy = b.y - a.y;
+    if (Math.hypot(dx, dy) < cell * 2.4) continue;
+    var type = pool[(rng() * pool.length) | 0];
+    counts[type] = (counts[type] || 0) + 1;
+    components.push({
+      type: type,
+      x: (a.x + b.x) / 2, y: (a.y + b.y) / 2,
+      ang: Math.atan2(dy, dx), s: cell,
+      band: bandOf((a.x + b.x) / 2, (a.y + b.y) / 2),
+      flash: 0,
+      label: COMP[type].p + counts[type]
+    });
+  }
+  // ground symbols at some trace ends
+  var gnd = 5 + ((rng() * 6) | 0);
+  for (var g = 0; g < gnd; g++) {
+    var t2 = traces[(rng() * traces.length) | 0];
+    var ep = t2.px[t2.px.length - 1];
+    components.push({ type:'gnd', x:ep.x, y:ep.y, ang:0, s:cell,
+                      band: bandOf(ep.x, ep.y), flash:0, label:'' });
+  }
+}
+
+// special feature blocks: RF antennas and an LED spectrum bank
+function buildFeatures(cell) {
+  antennas = [];
+  for (var i = 0; i < 2; i++) {
+    antennas.push({
+      x: (0.15 + rng() * 0.7) * W,
+      y: (0.07 + rng() * 0.16) * H,
+      s: cell * 1.6, phase: rng() * 6.283
+    });
+  }
+  var n = 16, sp = cell * 0.95, bw = sp * (n - 1);
+  var bx = W / 2 - bw / 2, by = H * 0.93;
+  var leds = [];
+  for (var k = 0; k < n; k++) leds.push({ x: bx + sp * k, y: by });
+  ledBank = { leds: leds, n: n, x: bx, y: by, w: bw, sp: sp, size: sp * 0.82 };
+  ledLevels = [];
+  for (var k2 = 0; k2 < n; k2++) ledLevels.push(0);
+}
+
+function drawPolyline(c, px, width, style) {
+  c.beginPath();
+  c.moveTo(px[0].x, px[0].y);
+  for (var i = 1; i < px.length; i++) c.lineTo(px[i].x, px[i].y);
+  c.lineWidth = width; c.strokeStyle = style; c.stroke();
+}
+
+function roundRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+function ln(c, x1, y1, x2, y2) {
+  c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+}
+
+// draw the geometry of a component using whatever stroke/fill/lineWidth are set
+function compShape(c, comp) {
+  var s = comp.s;
+  c.save();
+  c.translate(comp.x, comp.y);
+  c.rotate(comp.ang);
+  c.lineCap = 'round'; c.lineJoin = 'round';
+
+  if (comp.type === 'res') {
+    var bl = s * 1.4, bh = s * 0.46;
+    ln(c, -s * 1.0, 0, -bl / 2, 0);
+    ln(c, bl / 2, 0, s * 1.0, 0);
+    roundRect(c, -bl / 2, -bh / 2, bl, bh, s * 0.08);
+    c.fill(); c.stroke();
+
+  } else if (comp.type === 'cap') {
+    var g = s * 0.26, ph = s * 0.7;
+    ln(c, -s * 0.9, 0, -g, 0);
+    ln(c, g, 0, s * 0.9, 0);
+    ln(c, -g, -ph / 2, -g, ph / 2);
+    ln(c, g, -ph / 2, g, ph / 2);
+
+  } else if (comp.type === 'diode') {
+    var t = s * 0.66;
+    ln(c, -s * 0.9, 0, -t / 2, 0);
+    ln(c, t / 2, 0, s * 0.9, 0);
+    c.beginPath();
+    c.moveTo(-t / 2, -t * 0.55); c.lineTo(t / 2, 0); c.lineTo(-t / 2, t * 0.55); c.closePath();
+    c.fill(); c.stroke();
+    ln(c, t / 2, -t * 0.55, t / 2, t * 0.55);
+
+  } else if (comp.type === 'ind') {
+    ln(c, -s * 0.9, 0, -s * 0.6, 0);
+    ln(c, s * 0.6, 0, s * 0.9, 0);
+    var bumps = 4, bw = (s * 1.2) / bumps, x0 = -s * 0.6;
+    c.beginPath();
+    for (var k = 0; k < bumps; k++) {
+      var cx = x0 + bw * (k + 0.5);
+      c.moveTo(cx + bw / 2, 0);
+      c.arc(cx, 0, bw / 2, 0, Math.PI, true);
+    }
+    c.stroke();
+
+  } else if (comp.type === 'mosfet') {
+    // transistor in a can: leads left and right, three internal marks
+    ln(c, -s * 0.95, 0, -s * 0.5, 0);
+    ln(c, s * 0.5, 0, s * 0.95, 0);
+    c.beginPath(); c.arc(0, 0, s * 0.5, 0, 7); c.fill(); c.stroke();
+    ln(c, -s * 0.18, -s * 0.3, -s * 0.18, s * 0.3);     // gate bar
+    ln(c, -s * 0.18, -s * 0.16, s * 0.28, -s * 0.32);   // drain
+    ln(c, -s * 0.18, s * 0.16, s * 0.28, s * 0.32);     // source
+
+  } else if (comp.type === 'gate') {
+    // AND gate: flat back, rounded front, two inputs and one output
+    ln(c, -s * 0.95, -s * 0.22, -s * 0.45, -s * 0.22);
+    ln(c, -s * 0.95, s * 0.22, -s * 0.45, s * 0.22);
+    c.beginPath();
+    c.moveTo(-s * 0.45, -s * 0.42);
+    c.lineTo(0, -s * 0.42);
+    c.arc(0, 0, s * 0.42, -Math.PI / 2, Math.PI / 2);
+    c.lineTo(-s * 0.45, s * 0.42);
+    c.closePath();
+    c.fill(); c.stroke();
+    ln(c, s * 0.42, 0, s * 0.95, 0);
+
+  } else if (comp.type === 'sw') {
+    // single pole switch, lever lifted open
+    ln(c, -s * 0.95, 0, -s * 0.4, 0);
+    ln(c, s * 0.4, 0, s * 0.95, 0);
+    c.beginPath(); c.arc(-s * 0.4, 0, s * 0.09, 0, 7); c.fill(); c.stroke();
+    c.beginPath(); c.arc(s * 0.4, 0, s * 0.09, 0, 7); c.fill(); c.stroke();
+    ln(c, -s * 0.4, 0, s * 0.28, -s * 0.42);
+
+  } else if (comp.type === 'driver') {
+    // small driver IC with pin ticks and a pin-1 notch
+    var w = s * 1.3, h = s * 0.95;
+    ln(c, -s * 0.95, 0, -w / 2, 0);
+    ln(c, s * 0.95, 0, w / 2, 0);
+    roundRect(c, -w / 2, -h / 2, w, h, s * 0.1);
+    c.fill(); c.stroke();
+    var dp = 3, pl = s * 0.16;
+    for (var dpi = 0; dpi < dp; dpi++) {
+      var px = -w / 2 + w * (dpi + 1) / (dp + 1);
+      ln(c, px, -h / 2, px, -h / 2 - pl);
+      ln(c, px, h / 2, px, h / 2 + pl);
+    }
+    c.beginPath(); c.arc(-w / 2 + s * 0.16, -h / 2 + s * 0.16, s * 0.08, 0, 7); c.stroke();
+
+  } else if (comp.type === 'gnd') {
+    ln(c, 0, -s * 0.25, 0, s * 0.35);
+    var y = s * 0.35;
+    ln(c, -s * 0.5, y, s * 0.5, y);
+    ln(c, -s * 0.32, y + s * 0.22, s * 0.32, y + s * 0.22);
+    ln(c, -s * 0.16, y + s * 0.44, s * 0.16, y + s * 0.44);
+  }
+  c.restore();
+}
+
+// draw a component dim into the static board, with its silkscreen label
+function drawComponent(c, comp) {
+  c.lineWidth = Math.max(1, comp.s * 0.06);
+  c.strokeStyle = 'rgba(40,100,140,0.6)';
+  c.fillStyle = 'rgba(255,255,255,1)';
+  compShape(c, comp);
+  if (comp.label) {
+    c.fillStyle = 'rgba(40,100,140,0.42)';
+    c.font = 'bold ' + Math.round(comp.s * 0.5) + 'px system-ui, sans-serif';
+    c.textBaseline = 'alphabetic';
+    c.fillText(comp.label, comp.x + comp.s * 0.55, comp.y - comp.s * 0.5);
+  }
+}
+
+function renderStaticBoard(cell) {
+  off.width = canvas.width; off.height = canvas.height;
+  offctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  offctx.clearRect(0, 0, W, H);
+  offctx.fillStyle = '#f4f7f2';
+  offctx.fillRect(0, 0, W, H);
+  offctx.lineCap = 'round'; offctx.lineJoin = 'round';
+
+  for (var i = 0; i < traces.length; i++) {
+    var tr = traces[i];
+    drawPolyline(offctx, tr.px, cell * 0.18, 'rgba(150,180,195,0.22)');
+    drawPolyline(offctx, tr.px, cell * 0.07, 'rgba(40,100,140,0.5)');
+  }
+  for (var v = 0; v < vias.length; v++) {
+    var o = vias[v];
+    offctx.beginPath(); offctx.arc(o.x, o.y, o.r, 0, 7);
+    offctx.fillStyle = 'rgba(255,255,255,1)'; offctx.fill();
+    offctx.lineWidth = Math.max(1, cell * 0.04);
+    offctx.strokeStyle = 'rgba(40,100,140,0.65)'; offctx.stroke();
+  }
+  for (var k = 0; k < chips.length; k++) {
+    var ch = chips[k];
+    roundRect(offctx, ch.x - ch.s/2, ch.y - ch.s/2, ch.s, ch.s, cell * 0.12);
+    offctx.fillStyle = 'rgba(255,255,255,0.95)'; offctx.fill();
+    offctx.lineWidth = Math.max(1, cell * 0.05);
+    offctx.strokeStyle = 'rgba(40,100,140,0.55)'; offctx.stroke();
+    // pin ticks down the left and right edges, like an IC footprint
+    var pins = 3, pl = cell * 0.22;
+    offctx.lineWidth = Math.max(1, cell * 0.04);
+    for (var pn = 0; pn < pins; pn++) {
+      var py = ch.y - ch.s / 2 + ch.s * (pn + 1) / (pins + 1);
+      ln(offctx, ch.x - ch.s / 2, py, ch.x - ch.s / 2 - pl, py);
+      ln(offctx, ch.x + ch.s / 2, py, ch.x + ch.s / 2 + pl, py);
+    }
+  }
+  for (var cp = 0; cp < components.length; cp++) drawComponent(offctx, components[cp]);
+
+  // central core processor, with solder pads where the leads attach
+  if (coreChip) {
+    var cc = coreChip, hs2 = cc.s / 2;
+    roundRect(offctx, cc.x - hs2, cc.y - hs2, cc.s, cc.s, cell * 0.14);
+    offctx.fillStyle = 'rgba(223,230,238,0.98)'; offctx.fill();
+    offctx.lineWidth = Math.max(1, cell * 0.06);
+    offctx.strokeStyle = 'rgba(40,100,140,0.7)'; offctx.stroke();
+    offctx.fillStyle = 'rgba(40,100,140,0.55)';
+    for (var pdi = 0; pdi < cc.pads.length; pdi++) {
+      var pad = cc.pads[pdi];
+      offctx.fillRect(pad.x - cell * 0.07, pad.y - cell * 0.07, cell * 0.14, cell * 0.14);
+    }
+  }
+
+  // RF antennas
+  for (var ai = 0; ai < antennas.length; ai++) {
+    var an = antennas[ai], as = an.s, tipy = an.y - as * 0.5;
+    offctx.strokeStyle = 'rgba(40,100,140,0.6)';
+    offctx.fillStyle = 'rgba(255,255,255,0.95)';
+    offctx.lineWidth = Math.max(1, cell * 0.05);
+    roundRect(offctx, an.x - as * 0.3, an.y + as * 0.2, as * 0.6, as * 0.32, cell * 0.06);
+    offctx.fill(); offctx.stroke();
+    ln(offctx, an.x, an.y + as * 0.2, an.x, tipy);
+    offctx.beginPath(); offctx.arc(an.x, tipy, cell * 0.07, 0, 7); offctx.fill(); offctx.stroke();
+    offctx.globalAlpha = 0.28;
+    for (var rr = 1; rr <= 2; rr++) {
+      offctx.beginPath();
+      offctx.arc(an.x, tipy, as * 0.35 * rr, -Math.PI * 0.85, -Math.PI * 0.15);
+      offctx.stroke();
+    }
+    offctx.globalAlpha = 1;
+  }
+
+  // LED spectrum bank silkscreen
+  if (ledBank) {
+    var lb = ledBank;
+    roundRect(offctx, lb.x - cell * 0.6, lb.y - cell * 0.6, lb.w + cell * 1.2, cell * 1.2, cell * 0.18);
+    offctx.fillStyle = 'rgba(255,255,255,0.85)'; offctx.fill();
+    offctx.lineWidth = Math.max(1, cell * 0.045);
+    offctx.strokeStyle = 'rgba(40,100,140,0.5)'; offctx.stroke();
+    // data chain running through the strip, DIN to DOUT
+    var half = lb.size / 2;
+    offctx.strokeStyle = 'rgba(40,100,140,0.5)';
+    offctx.lineWidth = Math.max(1, cell * 0.035);
+    ln(offctx, lb.leds[0].x - half - cell * 0.5, lb.y, lb.leds[0].x - half, lb.y);
+    for (var dl = 0; dl < lb.leds.length - 1; dl++) {
+      ln(offctx, lb.leds[dl].x + half, lb.y, lb.leds[dl + 1].x - half, lb.y);
+    }
+    var lastLed = lb.leds[lb.leds.length - 1];
+    ln(offctx, lastLed.x + half, lb.y, lastLed.x + half + cell * 0.5, lb.y);
+    for (var li = 0; li < lb.leds.length; li++) {
+      drawNeopixel(offctx, lb.leds[li].x, lb.leds[li].y, lb.size, cell);
+    }
+  }
+}
+
+// a WS2812 style 5050 LED: square package, cut corner, corner pads,
+// round emitter, and a small bond-wire squiggle
+function drawNeopixel(c, x, y, size, cell) {
+  var h = size / 2, cut = size * 0.24;
+  c.lineCap = 'butt'; c.lineJoin = 'miter';
+  c.beginPath();
+  c.moveTo(x - h + cut, y - h);
+  c.lineTo(x + h, y - h);
+  c.lineTo(x + h, y + h);
+  c.lineTo(x - h, y + h);
+  c.lineTo(x - h, y - h + cut);
+  c.closePath();
+  c.fillStyle = 'rgba(255,255,255,0.96)'; c.fill();
+  c.lineWidth = Math.max(1, cell * 0.03);
+  c.strokeStyle = 'rgba(40,100,140,0.6)'; c.stroke();
+
+  var pad = size * 0.17, e = h - pad * 0.5 - size * 0.05;
+  var corners = [[-1,-1],[1,-1],[-1,1],[1,1]];
+  c.fillStyle = 'rgba(40,100,140,0.5)';
+  for (var i = 0; i < 4; i++) {
+    c.fillRect(x + corners[i][0] * e - pad / 2, y + corners[i][1] * e - pad / 2, pad, pad);
+  }
+
+  c.beginPath(); c.arc(x, y, size * 0.32, 0, 7);
+  c.fillStyle = 'rgba(255,255,255,1)'; c.fill();
+  c.lineWidth = Math.max(1, cell * 0.022);
+  c.strokeStyle = 'rgba(40,100,140,0.55)'; c.stroke();
+
+  var d = size * 0.11;
+  c.strokeStyle = 'rgba(40,100,140,0.5)'; c.lineWidth = Math.max(1, cell * 0.02);
+  c.strokeRect(x - d / 2, y - d / 2, d, d);
+  c.beginPath();
+  c.moveTo(x + d / 2, y);
+  c.lineTo(x + size * 0.14, y - size * 0.05);
+  c.lineTo(x + size * 0.20, y + size * 0.05);
+  c.lineTo(x + size * 0.28, y - size * 0.02);
+  c.stroke();
+  c.lineCap = 'round'; c.lineJoin = 'round';
+}
+
+// ---------- path helpers ----------
+// returns the run of points on a trace between two distances along it
+function subPath(tr, d0, d1) {
+  d0 = Math.max(0, d0); d1 = Math.min(tr.len, d1);
+  if (d1 <= d0) return null;
+  var cum = tr.cum, px = tr.px;
+  var pts = [pointAt(tr, d0)];
+  for (var i = 0; i < cum.length; i++) {
+    if (cum[i] > d0 && cum[i] < d1) pts.push({ x:px[i].x, y:px[i].y });
+  }
+  pts.push(pointAt(tr, d1));
+  return pts;
+}
+function strokePts(pts) {
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.stroke();
+}
+
+// ---------- pulses ----------
+function pointAt(tr, dist) {
+  if (dist <= 0) return { x:tr.px[0].x, y:tr.px[0].y };
+  if (dist >= tr.len) { var e = tr.px[tr.px.length-1]; return { x:e.x, y:e.y }; }
+  var cum = tr.cum, i = 1;
+  while (i < cum.length && cum[i] < dist) i++;
+  var a = tr.px[i-1], b = tr.px[i];
+  var segLen = (cum[i] - cum[i-1]) || 1;
+  var f = (dist - cum[i-1]) / segLen;
+  return { x:a.x + (b.x - a.x) * f, y:a.y + (b.y - a.y) * f };
+}
+
+function spawnPulses(dt) {
+  for (var b = 0; b < 5; b++) {
+    if (!bandTraces[b].length) continue;
+    spawnAcc[b] += energies[b] * energies[b] * (dt / 1000) * BANDS[b].sustain;
+    while (spawnAcc[b] > 1 && pulses.length < 360) {
+      spawnAcc[b] -= 1;
+      spawnOne(b, energies[b]);
+    }
+  }
+}
+
+function updatePulses(dt) {
+  var alive = [];
+  for (var i = 0; i < pulses.length; i++) {
+    var p = pulses[i];
+    p.pos += p.speed * (dt / 1000);
+    if (p.pos <= p.tr.len + 60) alive.push(p);
+  }
+  pulses = alive;
+}
+
+function drawPulse(p) {
+  var tr = p.tr;
+  var st = BANDS[p.band];
+  var col = st.color;
+  var tail = gCell * st.tailMul;
+
+  // head distance along the trace; reverse pulses start at the far end and run back
+  var head = p.rev ? (tr.len - p.pos) : p.pos;
+  head = Math.max(0, Math.min(tr.len, head));
+  var dir = p.rev ? 1 : -1;            // tail trails behind the head in this direction
+  var tailEnd = head + dir * tail;
+
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.strokeStyle = col;
+
+  // soft underglow across the lit window
+  var win = subPath(tr, Math.min(head, tailEnd), Math.max(head, tailEnd));
+  if (!win) { ctx.globalAlpha = 1; return; }
+  ctx.globalAlpha = 0.14 * p.intensity;
+  ctx.lineWidth = gCell * 0.34 * st.widthMul;
+  strokePts(win);
+
+  // bright core that ramps up toward the head
+  var chunks = 5;
+  for (var s = 0; s < chunks; s++) {
+    var dA = tailEnd + (head - tailEnd) * (s / chunks);
+    var dB = tailEnd + (head - tailEnd) * ((s + 1) / chunks);
+    var seg = subPath(tr, Math.min(dA, dB), Math.max(dA, dB));
+    if (!seg) continue;
+    var f = (s + 1) / chunks;
+    ctx.globalAlpha = p.intensity * f * 0.95;
+    ctx.lineWidth = gCell * (0.05 + 0.06 * f) * st.widthMul;
+    strokePts(seg);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- main loop ----------
+var last = 0;
+function frame(t) {
+  var dt = Math.min(50, (t - last) || 16); last = t;
+
+  updateEnergies();
+
+  spawnPulses(dt);
+  updatePulses(dt);
+
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(off, 0, 0, W, H);
+
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+  // whole-circuit flash: light every trace of a band that just got hit
+  for (var fi = 0; fi < traces.length; fi++) {
+    var ftr = traces[fi];
+    var bf = bandFlash[ftr.band];
+    if (bf < 0.03) continue;
+    ctx.strokeStyle = BANDS[ftr.band].color;
+    ctx.globalAlpha = Math.min(0.7, bf * 0.62);
+    ctx.lineWidth = gCell * 0.12;
+    strokePts(ftr.px);
+  }
+
+  // node flashes
+  for (var vi = 0; vi < vias.length; vi++) {
+    var o = vias[vi];
+    if (o.flash < 0.03) continue;
+    ctx.fillStyle = BANDS[o.band].color;
+    ctx.globalAlpha = Math.min(1, o.flash);
+    ctx.beginPath(); ctx.arc(o.x, o.y, o.r * (1.4 + o.flash), 0, 7); ctx.fill();
+    ctx.globalAlpha = o.flash * 0.5;
+    ctx.beginPath(); ctx.arc(o.x, o.y, o.r * (3.0 + o.flash * 2.5), 0, 7); ctx.fill();
+  }
+
+  // chip flashes
+  for (var ci = 0; ci < chips.length; ci++) {
+    var ch = chips[ci];
+    if (ch.flash < 0.03) continue;
+    ctx.fillStyle = BANDS[ch.band].color;
+    ctx.globalAlpha = ch.flash * 0.6;
+    roundRect(ctx, ch.x - ch.s/2, ch.y - ch.s/2, ch.s, ch.s, gCell * 0.12);
+    ctx.fill();
+  }
+
+  // component flashes, each in its own type color
+  for (var cmi = 0; cmi < components.length; cmi++) {
+    var cm = components[cmi];
+    if (cm.flash < 0.03) continue;
+    var col = COMP[cm.type].col;
+    ctx.strokeStyle = col; ctx.fillStyle = col;
+    ctx.globalAlpha = cm.flash * 0.85;
+    ctx.lineWidth = Math.max(1, cm.s * 0.08);
+    compShape(ctx, cm);
+  }
+
+  // traveling pulses
+  for (var i = 0; i < pulses.length; i++) drawPulse(pulses[i]);
+
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+
+  // brief board-wide lift on a strong bass hit
+  if (globalFlash > 0.02) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(255,150,60,' + (globalFlash * 0.05).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  drawCore();
+  drawFeatures(dt);
+  drawTempo(dt);
+}
+function ledSpectrum(n) {
+  var out = new Array(n);
+  if (mode === 'audio' && analyser) {
+    var lo = 60, hi = 16000;
+    for (var i = 0; i < n; i++) {
+      var f0 = lo * Math.pow(hi / lo, i / n);
+      var f1 = lo * Math.pow(hi / lo, (i + 1) / n);
+      var b0 = Math.max(1, Math.floor(f0 / binHz));
+      var b1 = Math.min(freqData.length - 1, Math.ceil(f1 / binHz));
+      var sum = 0, c = 0;
+      for (var b = b0; b <= b1; b++) { sum += freqData[b]; c++; }
+      out[i] = Math.pow((c ? sum / c : 0) / 255, 1.2);
+    }
+  } else {
+    for (var j = 0; j < n; j++) {
+      var pos = (j / (n - 1)) * 4;
+      var loB = Math.floor(pos), hiB = Math.min(4, loB + 1), f = pos - loB;
+      out[j] = energies[loB] * (1 - f) + energies[hiB] * f;
+    }
+  }
+  return out;
+}
+
+function drawFeatures(dt) {
+  var tnow = performance.now() / 1000;
+  ctx.globalCompositeOperation = 'source-over';
+
+  // antennas broadcast expanding rings, driven by the high bands
+  var rf = Math.max(energies[3], energies[4]);
+  for (var ai = 0; ai < antennas.length; ai++) {
+    var an = antennas[ai], as = an.s, tipx = an.x, tipy = an.y - as * 0.5;
+    for (var r = 0; r < 3; r++) {
+      var ph = (tnow * 0.8 + an.phase + r / 3) % 1;
+      var rad = as * 0.3 + ph * as * 1.7;
+      var a = (1 - ph) * (0.12 + rf * 0.75);
+      if (a <= 0.01) continue;
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = '#0088cc';
+      ctx.lineWidth = Math.max(1, gCell * 0.05);
+      ctx.beginPath(); ctx.arc(tipx, tipy, rad, -Math.PI * 0.85, -Math.PI * 0.15); ctx.stroke();
+    }
+    ctx.globalAlpha = 0.25 + rf * 0.6;
+    ctx.fillStyle = '#0088cc';
+    ctx.beginPath(); ctx.arc(tipx, tipy, gCell * 0.12, 0, 7); ctx.fill();
+  }
+
+  // LED spectrum bank: each emitter a hue, brightness from its frequency level
+  if (ledBank) {
+    var lb = ledBank, n = lb.n, spec = ledSpectrum(n), sz = lb.size;
+    for (var i = 0; i < n; i++) {
+      var tgt = spec[i];
+      var at = tgt > ledLevels[i] ? 0.5 : 0.12;
+      ledLevels[i] += (tgt - ledLevels[i]) * at;
+      var lvl = ledLevels[i];
+      var Ld = lb.leds[i];
+      var hue = 20 + 270 * i / (n - 1);
+      ctx.fillStyle = 'hsl(' + hue + ',95%,48%)';
+      ctx.globalAlpha = Math.min(1, 0.1 + lvl);
+      ctx.beginPath(); ctx.arc(Ld.x, Ld.y, sz * 0.3 * (0.55 + 0.45 * lvl), 0, 7); ctx.fill();
+      ctx.globalAlpha = Math.min(0.7, lvl * 0.6);
+      ctx.beginPath(); ctx.arc(Ld.x, Ld.y, sz * (0.32 + 0.5 * lvl), 0, 7); ctx.fill();
+    }
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// the central processor glows with the music and flares on the beat
+function drawCore() {
+  if (!coreChip) return;
+  var e = Math.max(energies[0], energies[2], energies[4]);
+  var glow = Math.min(1, 0.2 + e * 0.5 + coreFlash * 0.6);
+  var x = coreChip.x, y = coreChip.y, s = coreChip.s;
+
+  ctx.globalCompositeOperation = 'source-over';
+  var rad = s * (0.85 + coreFlash * 0.6);
+  var g = ctx.createRadialGradient(x, y, s * 0.25, x, y, rad);
+  g.addColorStop(0, 'rgba(0,136,204,' + (glow * 0.38).toFixed(3) + ')');
+  g.addColorStop(1, 'rgba(0,136,204,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.fill();
+
+  ctx.globalAlpha = Math.min(0.6, 0.12 + coreFlash * 0.5);
+  ctx.fillStyle = '#0088cc';
+  roundRect(ctx, x - s / 2, y - s / 2, s, s, gCell * 0.18);
+  ctx.fill();
+
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// the tempo circuit carries a train of beads that scrolls at the beat rate
+// and crosses a fixed read point on each beat, like a scope sweep
+function drawTempo(dt) {
+  if (tempoLevel < 0.01 || !tempoCircuits.length) { markerFlash *= 0.9; return; }
+  var tnow = performance.now() / 1000;
+  ctx.globalCompositeOperation = 'source-over';
+
+  for (var ci = 0; ci < tempoCircuits.length; ci++) {
+    var c = tempoCircuits[ci];
+    var tr = traces[c.idx];
+    var spacing = gCell * 2.6;
+    var dMark = tr.len * 0.5;
+
+    if (beatPeriod > 0) c.beadOffset += spacing * (dt / beatPeriod);
+    c.beadOffset = c.beadOffset % tr.len;
+
+    // each circuit breathes on its own phase, so they cross-fade
+    var breath = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(tnow * 0.85 + c.phase));
+    var lvl = tempoLevel * breath;
+
+    var n = Math.ceil(tr.len / spacing) + 2;
+    for (var k = 0; k < n; k++) {
+      var d = (k * spacing + c.beadOffset) % tr.len;
+      if (d < 0) d += tr.len;
+      var pt = pointAt(tr, d);
+      var near = 1 - Math.min(1, Math.abs(d - dMark) / (spacing * 0.6));
+      var r = gCell * (0.06 + 0.08 * near);
+      ctx.fillStyle = '#000080';
+      ctx.globalAlpha = (0.22 + 0.4 * near) * lvl;
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, r, 0, 7); ctx.fill();
+    }
+
+    var mp = pointAt(tr, dMark);
+    ctx.fillStyle = '#d00000';
+    ctx.globalAlpha = (0.32 + markerFlash * 0.5) * lvl;
+    ctx.beginPath(); ctx.arc(mp.x, mp.y, gCell * (0.09 + markerFlash * 0.12), 0, 7); ctx.fill();
+  }
+
+  markerFlash *= 0.85;
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+var running = false;
+function fit(cv) {
+  var w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  if (w === W && h === H && canvas === cv) return;
+  canvas = cv; ctx = cv.getContext('2d');
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = w; H = h;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  pulses = [];
+  buildCircuit();
+}
+window.CircuitFX = {
+  // an: AnalyserNode or null for the built-in demo rhythm; sr: the audio sample rate
+  frame: function (cv, an, sr) {
+    fit(cv);
+    if (!canvas) return;
+    if (an) {
+      if (analyser !== an) { analyser = an; freqData = new Uint8Array(an.frequencyBinCount); }
+      binHz = sr / an.fftSize;
+      mode = 'audio';
+    } else {
+      mode = 'demo';
+    }
+    frame(performance.now());
+  },
+  regen: function () { seed = (Math.random() * 1e9) | 0; W = 0; },
+  reset: function () { W = 0; },
+  bpm: function () { return bpmActive ? Math.round(bpm) : 0; }
+};
+})();

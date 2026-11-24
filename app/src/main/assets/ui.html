@@ -107,6 +107,7 @@ table.list td.r, table.list th.r { text-align: right; white-space: nowrap; }
 .more { text-align: center; padding: 12px 0; }
 #foot { text-align: center; font-size: 10px; color: #404040; padding: 10px; border-top: 1px solid #808080; background: #f4f4f4; }
 .hide { display: none !important; }
+.monitor .scr.vfull { position: fixed; inset: 0; padding-top: 0; z-index: 60; border: 0; }
 .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
 .note { font-size: 11px; color: #404040; }
 </style>
@@ -130,6 +131,7 @@ table.list td.r, table.list th.r { text-align: right; white-space: nowrap; }
     <div style="margin-top:4px">FileCensus. Everything stays on this phone. Nothing is uploaded.</div>
   </div>
 </div>
+<script src="circuit.js"></script>
 <script>
 // GREEN PHONE EDIT
 "use strict";
@@ -252,6 +254,7 @@ function go(view, extra) {
   render();
 }
 window.fcBack = function () {
+  if (vfullOpen) { vizFull(); return true; }
   if (fullOpen) { closeFull(); return true; }
   if (detailOpen) { closeDetail(); return true; }
   if (hist.length) { S = JSON.parse(hist.pop()); render(); return true; }
@@ -729,15 +732,16 @@ function vizPlaces() {
 }
 
 // ------------------------------------------------------------------ built-in viewers
-let media = { ctx: null, src: null, an: null, raf: 0, el: null, mode: "bars" };
+let media = { ctx: null, src: null, an: null, raf: 0, el: null, mode: "circuit" };
 function viewerHtml(d) {
   const p = encodeURIComponent(d.path);
   if (d.kind === "image") return `<div class="monitor"><div class="scr"><img src="/preview?p=${p}" onclick="fullView('${p}')" onerror="this.onerror=null;this.src='${thumbUrl(d.path)}'"></div></div><div class="note" style="text-align:center">Tap the picture for full screen.</div>`;
   if (d.kind === "video" || d.kind === "audio") {
     const tag = d.kind === "video" ? `<video id="mel" controls playsinline preload="metadata" src="/file?p=${p}" style="width:100%;display:block;background:#000080;max-height:340px"></video>` : `<audio id="mel" controls preload="metadata" src="/file?p=${p}" style="width:100%"></audio>`;
     return (d.kind === "video" ? `<div class="monitor" style="max-width:520px">${tag}</div>` : "") +
-      `<div class="monitor"><div class="scr" style="background:#fff"><canvas id="vcv" style="position:absolute;inset:0;width:100%;height:100%"></canvas></div></div>` +
-      `<div class="row" style="justify-content:center">${[["bars", "Spectrum"], ["scope", "Scope"], ["radial", "Radial"], ["wave", "Waterfall"]].map(m => `<a class="btn small ${media.mode === m[0] ? "down" : ""}" data-m="${m[0]}" onclick="vizMode('${m[0]}',this)">${m[1]}</a>`).join("")}</div>` +
+      `<div class="monitor"><div class="scr" style="background:#fff"><canvas id="vcv" onclick="if(vfullOpen)vizFull()" style="position:absolute;inset:0;width:100%;height:100%"></canvas></div></div>` +
+      `<div class="row" style="justify-content:center">${[["circuit", "Circuit"], ["bars", "Spectrum"], ["scope", "Scope"], ["radial", "Radial"], ["wave", "Waterfall"]].map(m => `<a class="btn small ${media.mode === m[0] ? "down" : ""}" data-m="${m[0]}" onclick="vizMode('${m[0]}',this)">${m[1]}</a>`).join("")}</div>` +
+      `<div class="row" style="justify-content:center"><a class="btn small" onclick="vizFull()">Full screen</a><a class="btn small" id="vregen" onclick="if(window.CircuitFX)CircuitFX.regen()">New board</a></div>` +
       (d.kind === "audio" ? tag : `<div class="note" style="text-align:center">The visualizer follows the video's sound.</div>`);
   }
   if (d.kind === "text" || d.kind === "code") {
@@ -761,9 +765,13 @@ function wireViewer() {
       drawViz();
     } catch (e) { }
   });
+  el.addEventListener("pause", () => { if (media.mode === "circuit") circuitIdle(); });
   idleViz();
 }
-function vizMode(m, btn) { media.mode = m; document.querySelectorAll("[data-m]").forEach(b => b.classList.toggle("down", b === btn)); media.fall = null; if (!media.el || media.el.paused) idleViz(); }
+function vizMode(m, btn) {
+  media.mode = m;
+  const rg = document.getElementById("vregen"); if (rg) rg.style.display = m === "circuit" ? "" : "none";
+  if (m === "circuit" && window.CircuitFX) CircuitFX.reset(); document.querySelectorAll("[data-m]").forEach(b => b.classList.toggle("down", b === btn)); media.fall = null; if (!media.el || media.el.paused) idleViz(); }
 function sizeCanvas() {
   const cv = document.getElementById("vcv"); if (!cv) return null;
   const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
@@ -772,13 +780,41 @@ function sizeCanvas() {
   return { cv, g, W, H };
 }
 function idleViz() {
+  if (media.mode === "circuit" && window.CircuitFX) { circuitIdle(); return; }
   const c = sizeCanvas(); if (!c) return;
   const { g, W, H } = c;
   g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
   g.strokeStyle = "#dfe8f7"; for (let x = 0; x < W; x += 16) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); } for (let y = 0; y < H; y += 16) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
   g.fillStyle = "#000080"; g.font = "bold 12px Tahoma"; g.textAlign = "center"; g.fillText("Press play to start the visualizer", W / 2, H / 2);
 }
+// Circuit runs its own demo rhythm until the track plays, like the original app.
+function circuitIdle() {
+  cancelAnimationFrame(media.raf);
+  const step = () => {
+    const cv = document.getElementById("vcv");
+    if (!cv || media.mode !== "circuit" || (media.el && !media.el.paused && media.an)) return;
+    CircuitFX.frame(cv, null, 44100);
+    media.raf = requestAnimationFrame(step);
+  };
+  step();
+}
+function vizFull() {
+  const sc = document.getElementById("vcv").parentElement;
+  const on = !sc.classList.contains("vfull");
+  sc.classList.toggle("vfull", on);
+  vfullOpen = on;
+  if (window.CircuitFX) CircuitFX.reset();
+  if (!media.el || media.el.paused) idleViz();
+}
+let vfullOpen = false;
 function drawViz() {
+  if (media.mode === "circuit" && window.CircuitFX) {
+    const cv = document.getElementById("vcv");
+    if (!cv || !document.body.contains(cv)) return;
+    CircuitFX.frame(cv, media.an, media.ctx ? media.ctx.sampleRate : 44100);
+    media.raf = requestAnimationFrame(drawViz);
+    return;
+  }
   const c = sizeCanvas();
   if (!c || !media.an || !document.body.contains(c.cv)) return;
   const { g, W, H } = c, an = media.an, n = an.frequencyBinCount;
@@ -826,6 +862,7 @@ function drawViz() {
 }
 function stopMedia() {
   cancelAnimationFrame(media.raf);
+  vfullOpen = false;
   if (media.el) { try { media.el.pause(); media.el.removeAttribute("src"); media.el.load(); } catch (e) { } }
   media.el = null; media.peaks = null;
 }
