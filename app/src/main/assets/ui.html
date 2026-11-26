@@ -331,7 +331,7 @@ function poll() {
     }
     if (curBoard && S.view === "viz") curBoard.scan(st);
     if (review) return;
-    if (S.view === "dupes" && st.phase === "finding duplicates" && now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200) {
+    if (S.view === "dupes" && S.f.dscope !== "fleet" && st.phase === "finding duplicates" && now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200) {
       lastRefresh = now; dupesView();
     } else if (now - lastRefresh > 4000 && !detailOpen && window.scrollY < 200 && document.getElementById("list")) {
       lastRefresh = now; render(true);
@@ -558,12 +558,18 @@ function statsView() {
 
 // ------------------------------------------------------------------ duplicates
 let dupePage = { offset: 0, done: false };
+function dupeScopeRow() {
+  const fleet = S.f.dscope === "fleet";
+  return `<div class="row"><a class="btn ${fleet ? "" : "down"}" onclick="S.f.dscope='';dupesView()">On this phone</a>` +
+    `<a class="btn ${fleet ? "down" : ""}" onclick="S.f.dscope='fleet';dupesView()">Across phones</a></div>`;
+}
 function dupesView() {
+  if (S.f.dscope === "fleet") return twinsView();
   const st = J("status") || {};
   const main = document.getElementById("main");
   const kinds = `<option value="">All types</option>` + Object.keys(KINDS).map(k => `<option value="${k}" ${S.f.kind === k ? "selected" : ""}>${KINDS[k]}</option>`).join("");
   const r = J("dupes", 0, 1, S.f.kind || "") || {};
-  let html = `<h1 class="pg">Duplicates</h1><div class="crumb">Files are compared by size, then by a quick hash of their first and last 64 KB, then by a full SHA-256 of every byte. Only exact byte-for-byte copies are listed here.</div>`;
+  let html = `<h1 class="pg">Duplicates</h1>${dupeScopeRow()}<div class="crumb">Files are compared by size, then by a quick hash of their first and last 64 KB, then by a full SHA-256 of every byte. Only exact byte-for-byte copies are listed here.</div>`;
   html += `<div class="order"><b>${(r.groups || 0).toLocaleString()}</b> sets of duplicates, <b>${(r.files || 0).toLocaleString()}</b> files, <b class="now">${esc(size(r.wasted || 0))}</b> taken up by the extra copies.` +
     `<div class="row"><select id="dkind" onchange="S.f.kind=this.value;dupesView()">${kinds}</select><a class="btn ${st.running ? "" : "go"}" onclick="recheckDupes()">${st.running ? "Census running" : "Recheck duplicates"}</a>` +
     (r.groups ? `<a class="btn" onclick="deleteAllExtras()">Review deleting every extra copy</a>` : "") + `</div>` +
@@ -614,6 +620,99 @@ function tagExtras(gid) {
   document.querySelectorAll(`.info[data-g="${gid}"][data-extra="1"] a[data-p]`).forEach(a => { call("setTag", a.getAttribute("data-p"), id, true); n++; });
   refreshTags();
   document.getElementById("dm" + gid).textContent = n + " tagged " + (tagMap[id] ? tagMap[id].name : "") + ".";
+}
+
+// ------------------------------------------------------------------ duplicates across phones (fleet twins)
+let twinPage = { offset: 0, done: false, sets: 0, me: "", names: {} };
+function twinsView() {
+  const main = document.getElementById("main");
+  const cfg = J("fleetConfig") || {};
+  let h = `<h1 class="pg">Duplicates</h1>${dupeScopeRow()}`;
+  if (!cfg.enabled) {
+    h += `<div class="crumb">Finding the same file on more than one phone needs the fleet server. Join this phone to the fleet, push it, and do the same on your other phones.</div>` +
+      `<div class="row"><a class="btn go" onclick="go('fleet')">Set up the fleet</a></div>`;
+    main.innerHTML = h;
+    return;
+  }
+  const kinds = `<option value="">All types</option>` + Object.keys(KINDS).map(k => `<option value="${k}" ${S.f.kind === k ? "selected" : ""}>${KINDS[k]}</option>`).join("");
+  h += `<div class="crumb">The same file on more than one phone. Files are matched by size plus a fingerprint of their first and last 16 KB. Each phone counts as of its last push, so push every phone after its census for fresh results.</div>` +
+    `<div class="row"><select id="tkind" onchange="S.f.kind=this.value;twinsView()">${kinds}</select>` +
+    `<a class="btn go" onclick="fleetPushNow();setTimeout(twinsView,800)">Push this phone</a>` +
+    `<a class="btn" onclick="deleteAllTwinsHere()">Review deleting this phone's copies</a></div>` +
+    `<div class="order" id="tsum"><p class="pending">Asking the fleet...</p></div><div id="tpairs"></div><div id="tlist"></div><div class="more" id="tmore"></div>`;
+  main.innerHTML = h;
+  twinPage = { offset: 0, done: false, sets: 0, me: cfg.id || "", names: {} };
+  fleetGet("/v1/devices", (code, j) => {
+    if (code !== 200) { const b = document.getElementById("tsum"); if (b) b.innerHTML = `<span style="color:#d00000">${esc(j.error || "Server answered " + code)}</span>`; return; }
+    fleetState.devices = j.devices || [];
+    fleetState.devices.forEach(d => twinPage.names[d.id] = d);
+    moreTwins();
+  });
+}
+function twinQuery(extra) {
+  return new URLSearchParams(Object.assign({ kind: S.f.kind || "", me: twinPage.me }, extra || {})).toString();
+}
+function moreTwins() {
+  if (twinPage.done) return;
+  const at = twinPage.offset;
+  fleetGet("/v1/twins?" + twinQuery({ offset: at, limit: 20 }), (code, j) => {
+    const sum = document.getElementById("tsum"), list = document.getElementById("tlist");
+    if (!sum || !list || S.f.dscope !== "fleet") return;
+    if (code !== 200) { sum.innerHTML = `<span style="color:#d00000">${esc(code === 404 ? "The fleet server needs its latest update before it can match phones." : (j.error || "Server answered " + code))}</span>`; return; }
+    const names = twinPage.names;
+    const chipOf = id => { const d = names[id] || {}; return phoneChip(d.name || id, d.color || "gray"); };
+    if (!at) {
+      sum.innerHTML = `<b>${(j.sets || 0).toLocaleString()}</b> files held by more than one phone, <b>${(j.files || 0).toLocaleString()}</b> copies across the fleet, <b class="now">${esc(size(j.extra || 0))}</b> taken up by the extra copies.` +
+        `<div class="note">This phone holds <b>${(j.mine || 0).toLocaleString()}</b> of them, <b>${esc(size(j.mineBytes || 0))}</b>.</div>`;
+      const pairs = j.pairs || [];
+      document.getElementById("tpairs").innerHTML = pairs.length ? `<h2 class="sec">Phones sharing files</h2><table class="list"><tr><th>Phones</th><th class="r">Files</th><th class="r">Size</th></tr>` +
+        pairs.map(p => `<tr><td>${chipOf(p.a)}${chipOf(p.b)}</td><td class="r">${p.sets.toLocaleString()}</td><td class="r">${esc(size(p.bytes))}</td></tr>`).join("") + `</table>` : "";
+      if (!(j.items || []).length) list.innerHTML = `<p class="pending">No file shows up on more than one phone yet. Push every phone in the fleet, then look again.</p>`;
+    }
+    let h = "";
+    for (const g of j.items || []) {
+      const mine = g.files.some(f => f.device === twinPage.me);
+      h += `<h2 class="sec">${g.copies} copies on ${g.phones} phones, ${esc(size(g.size))}<small>${esc(size(g.extra))} extra</small></h2>` +
+        `<div class="note">${esc(KINDS[g.kind] || g.kind)} | fingerprint ${esc(g.fp.slice(0, 12))} | the oldest copy is listed first` +
+        (mine ? ` | <a onclick="deleteTwinHere('${esc(g.fp)}')">delete the copy on this phone</a>` : "") + `</div><table class="list">`;
+      g.files.forEach((it, i) => {
+        const here = it.device === twinPage.me;
+        const nm = esc(it.path.split("/").pop());
+        h += `<tr><td>${phoneChip(it.phone, it.color)}${i === 0 ? '<span class="badge gps" style="animation:none">OLDEST</span>' : ""}` +
+          `<div>${here ? `<a onclick="openDetail(this)" data-p="${esc(it.path)}"><b>${nm}</b></a>` : `<b>${nm}</b>`}${it.nick ? `<span class="nick" style="color:#000080">${esc(it.nick)}</span>` : ""}</div>` +
+          `<div class="note">${esc(it.path.slice(0, it.path.lastIndexOf("/")).replace(/^\/storage\/emulated\/0/, "Internal"))} | ${esc(dtstr(it.dt || it.mtime))}</div></td>` +
+          `<td class="r">${esc(size(it.size))}</td></tr>`;
+      });
+      h += `</table>`;
+    }
+    list.insertAdjacentHTML("beforeend", h);
+    twinPage.sets = j.sets || 0;
+    twinPage.offset = at + (j.items || []).length;
+    twinPage.done = twinPage.offset >= twinPage.sets || !(j.items || []).length;
+    document.getElementById("tmore").innerHTML = twinPage.done ? "" : `<a class="btn" onclick="moreTwins()">Show more sets (${(twinPage.sets - twinPage.offset).toLocaleString()} left)</a>`;
+  });
+}
+function localPathsFor(fps) {
+  const paths = [];
+  for (let i = 0; i < fps.length; i += 1000) {
+    const r = J("localByFp", JSON.stringify(fps.slice(i, i + 1000))) || {};
+    Object.values(r).forEach(a => a.forEach(p => paths.push(p)));
+  }
+  return paths;
+}
+function deleteTwinHere(fp) {
+  const paths = localPathsFor([fp]);
+  if (!paths.length) { alertBox("This phone no longer lists that file. Run a census and push again."); return; }
+  reviewDelete(paths, "This phone's copy of a file another phone also holds. The other phones keep theirs.");
+}
+function deleteAllTwinsHere() {
+  if (!twinPage.me) return;
+  fleetGet("/v1/twins/fps?" + new URLSearchParams({ device: twinPage.me, kind: S.f.kind || "" }), (code, j) => {
+    if (code !== 200) { alertBox(j.error || "Server answered " + code); return; }
+    const paths = localPathsFor(j.fps || []);
+    if (!paths.length) { alertBox("This phone holds no file that another phone also has."); return; }
+    reviewDelete(paths, "Every file on this phone that another phone in the fleet also holds, as of each phone's last push. The other phones keep their copies. Do this from one phone only: if every phone deletes its copies, the file is gone from all of them.");
+  });
 }
 
 // ------------------------------------------------------------------ visualizers
@@ -1282,7 +1381,7 @@ function fleetView() {
   const st = J("fleetStatus") || {};
   h += `<div class="order"><div class="row" style="margin:0">${phoneChip(cfg.name, cfg.color)}<span class="note">${esc(cfg.model)}</span></div>` +
     `<div id="fl_push">${pushLine(st)}</div>` +
-    `<div class="row"><a class="btn go" onclick="fleetPushNow()">Push this phone now</a><a class="btn" onclick="fleetState.setup=true;fleetView()">Settings</a></div></div>`;
+    `<div class="row"><a class="btn go" onclick="fleetPushNow()">Push this phone now</a><a class="btn" onclick="fleetState.setup=true;fleetView()">Settings</a><a class="btn" onclick="go('dupes',{f:{dscope:'fleet'}})">Duplicates across phones</a></div></div>`;
   h += `<h2 class="sec">Search every phone</h2>` +
     `<div class="row"><input type="text" id="fl_q" style="width:170px" placeholder="name, folder, or nickname" value="${esc(fleetState.q)}" onkeydown="if(event.key==='Enter')fleetSearch()">` +
     `<select id="fl_kind"><option value="">All types</option>${Object.keys(KINDS).map(k => `<option value="${k}" ${fleetState.kind === k ? "selected" : ""}>${KINDS[k]}</option>`).join("")}</select>` +
